@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "wef-core",
+    "wef-engine",
+    "wef-cli", "wef-engine-rs",
+]
