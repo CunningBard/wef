@@ -5,3 +5,6 @@ members = [
     "crates/wef-engine-rs",
     "crates/wef-cli",
 ]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"

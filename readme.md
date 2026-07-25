@@ -60,4 +60,7 @@ Very early development. The format and APIs are not stable yet.
 
 ## License
 
-To be decided.
+WEF is dual-licensed under the terms of either the MIT License or the
+Apache License, Version 2.0, at your option.
+
+See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
