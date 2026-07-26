@@ -1,0 +1,1 @@
+{"name":"image request","operation":"getImageRequest","input":{"manga":{"key":"m","title":"M"},"url":"https://example.org/primary"},"expected":{"url":"https://example.org/primary","candidates":[{"url":"https://example.org/fallback","headers":{"Referer":"https://example.org/"}}]}}

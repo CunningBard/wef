@@ -1,15 +1,11 @@
 [package]
-name = "wef-cli"
+name = "wef-lint"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
-[[bin]]
-name = "wef"
-path = "src/main.rs"
-
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+wef-core = { path = "../wef-core" }
 wef-engine-rs = { path = "../wef-engine-rs" }
-wef-lint = { path = "../wef-lint" }

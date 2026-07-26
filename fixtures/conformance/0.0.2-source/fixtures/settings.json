@@ -1,0 +1,1 @@
+{"name":"settings","operation":"getSettings","input":null,"expected":[{"id":"mode","name":"Mode","type":"select","options":[{"id":"safe","name":"Safe"}],"default":"safe"},{"id":"token","name":"Token","secret":true,"type":"text"}]}

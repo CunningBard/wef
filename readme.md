@@ -58,6 +58,42 @@ WEF does not define:
 
 Very early development. The format and APIs are not stable yet.
 
+The reference engine currently loads and validates a package, executes the
+four core async operations, exposes `url.resolve` and `ctx.fail`, and provides
+a synchronous `UreqHost` for text HTTP requests. A host can be attached with:
+
+```rust
+use wef_engine_rs::{Engine, UreqHost};
+
+let engine = Engine::with_host(UreqHost::default());
+```
+
+An initial MangaDex source implementation is available in
+[`source/mangadex`](source/mangadex). It supports latest and popular listings,
+search, manga details, English chapter feeds, and MangaDex@Home pages.
+
+## CLI
+
+The reference CLI validates packages, runs core operations, and replays source
+fixtures:
+
+```text
+cargo run -p wef-cli --bin wef -- validate source/mangadex
+cargo run -p wef-cli --bin wef -- test source/mangadex
+cargo run -p wef-cli --bin wef -- run source/mangadex listing latest --page 1
+cargo run -p wef-cli --bin wef -- run --session mangadex-cookies.json source/mangadex listing latest
+```
+
+`run` uses the production HTTP host. `test` uses `fixtures/*.json` request and
+response recordings, so it is deterministic and does not contact the source.
+The optional `--session` argument persists only persistent cookies in an
+explicit JSON file; that file may contain authenticated session material and
+should be protected accordingly.
+
+See [ROADMAP.md](ROADMAP.md) for implementation status and next milestones.
+For the experimental capability migration, see
+[Migrating to 0.0.2](docs/MIGRATING-0.0.2.md).
+
 ## License
 
 WEF is dual-licensed under the terms of either the MIT License or the

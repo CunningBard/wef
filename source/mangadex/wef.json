@@ -1,0 +1,32 @@
+{
+  "wef": "0.0.1",
+  "id": "org.mangadex",
+  "name": "MangaDex",
+  "version": "0.1.0",
+  "entry": "source.js",
+  "languages": [
+    "en"
+  ],
+  "baseUrls": [
+    "https://api.mangadex.org",
+    "https://uploads.mangadex.org",
+    "https://mangadex.org"
+  ],
+  "requires": [
+    "http"
+  ],
+  "listings": [
+    {
+      "id": "latest",
+      "name": "Latest Updates"
+    },
+    {
+      "id": "popular",
+      "name": "Popular"
+    }
+  ],
+  "capabilities": {
+    "filters": true,
+    "urlResolution": true
+  }
+}

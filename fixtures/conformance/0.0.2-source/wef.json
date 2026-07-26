@@ -1,0 +1,1 @@
+{"wef":"0.0.2","id":"org.wef.conformance.0-0-2","name":"WEF 0.0.2 conformance","version":"0.0.2","entry":"source.js","languages":["en"],"baseUrls":["https://example.org"],"requires":["http"],"listings":[{"id":"latest","name":"Latest"}],"capabilities":{"settings":true,"filters":true,"imageRequests":true},"network":{"rateLimit":{"maxRequests":2,"windowMs":1000}}}

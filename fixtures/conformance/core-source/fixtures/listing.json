@@ -1,0 +1,1 @@
+{"name":"listing","operation":"getMangaList","input":{"listingId":"latest","page":1},"expected":{"items":[{"key":"list-1","title":"Listing"}],"hasNextPage":false}}

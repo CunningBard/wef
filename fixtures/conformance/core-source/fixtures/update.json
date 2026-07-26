@@ -1,0 +1,1 @@
+{"name":"update","operation":"getMangaUpdate","input":{"manga":{"key":"m","title":"Manga"},"chapters":[{"key":"c","name":"Chapter"}],"fetchDetails":true,"fetchChapters":true},"expected":{"manga":{"key":"m","title":"Manga"},"chapters":[{"key":"c","name":"Chapter"}]}}

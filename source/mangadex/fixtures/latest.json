@@ -1,0 +1,60 @@
+{
+  "name": "latest listing maps a minimal manga record",
+  "operation": "getMangaList",
+  "input": {
+    "listingId": "latest",
+    "page": 1
+  },
+  "http": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.mangadex.org/manga",
+        "headers": {
+          "Accept": "application/json"
+        },
+        "query": {
+          "limit": "24",
+          "offset": "0",
+          "contentRating[]": [
+            "safe",
+            "suggestive",
+            "erotica"
+          ],
+          "availableTranslatedLanguage[]": [
+            "en"
+          ],
+          "includes[]": [
+            "cover_art",
+            "author",
+            "artist"
+          ],
+          "hasAvailableChapters": "true",
+          "order[latestUploadedChapter]": "desc"
+        }
+      },
+      "response": {
+        "status": 200,
+        "url": "https://api.mangadex.org/manga",
+        "headers": {},
+        "body": "{\"result\":\"ok\",\"response\":\"collection\",\"data\":[{\"id\":\"11111111-1111-4111-8111-111111111111\",\"type\":\"manga\",\"attributes\":{\"title\":{\"en\":\"Fixture Manga\"},\"status\":\"ongoing\",\"contentRating\":\"safe\",\"tags\":[]},\"relationships\":[]}],\"limit\":24,\"offset\":0,\"total\":1}"
+      }
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "key": "11111111-1111-4111-8111-111111111111",
+        "title": "Fixture Manga",
+        "url": "https://mangadex.org/title/11111111-1111-4111-8111-111111111111",
+        "updateStrategy": "always",
+        "extra": {
+          "mangaId": "11111111-1111-4111-8111-111111111111"
+        },
+        "status": "ongoing",
+        "contentRating": "safe"
+      }
+    ],
+    "hasNextPage": false
+  }
+}

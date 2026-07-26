@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/wef-core",
     "crates/wef-engine-rs",
+    "crates/wef-lint",
     "crates/wef-cli",
 ]
 
