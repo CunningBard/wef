@@ -12,10 +12,16 @@ wire-identical to the `0.0.4` draft it finalizes).
 
 ### Specification (`crates/wef-spec/`)
 
-- Versioned format documents `0.0.1` through `0.0.4`.
+- Versioned format documents `0.0.1` through `0.0.4`, plus the standalone
+  `0.1.0` consolidation (self-contained; wire-identical to `0.0.4`).
 - `0.0.4` adds source storage (`ctx.store`), unmatched-observation
   envelopes (`capture.includeUnmatched`), and retires host-side
   click-pagination (multi-page lists are the source's job now).
+- `0.1.0` standardizes extension repositories: `repo.json` metadata,
+  generated `index.json` catalog, `sources/<id>/` layout with the
+  `<language|multi>.wef.<site>` identity scheme, and a MUST-ignore rule
+  for everything else. Display icons are conventional only
+  (`res/icon.png`, never in `wef.json`, never validated).
 
 ### Reference engine (`crates/wef-engine-rs/`)
 
@@ -42,7 +48,7 @@ wire-identical to the `0.0.4` draft it finalizes).
 
 ### Reference sources (`sources/`)
 
-- `org.mangadex`, `org.wef.html-example`: public-API and HTML scraping
+- `multi.wef.magadex`, `en.wef.html-example`: public-API and HTML scraping
   patterns with fixtures.
 
 ### Security (`SECURITY.md`)

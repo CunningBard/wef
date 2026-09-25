@@ -2,7 +2,8 @@
 
 WEF is a proposed portable format for defining manga sources across different readers.
 
-Instead of maintaining separate source extensions for every app, a source can be written once in WEF and executed by any compatible WEF engine.
+Instead of maintaining separate source extensions for every app, a source
+can be written once in WEF and executed by any compatible WEF engine.
 
 ## Core idea
 
@@ -15,7 +16,9 @@ WEF describes how to retrieve source data such as:
 
 WEF itself is only a format.
 
-A **WEF engine** is an implementation that reads and executes WEF source definitions. Different readers may implement their engines however they want, as long as they follow the WEF specification.
+A **WEF engine** is an implementation that reads and executes WEF source
+definitions. Different readers may implement their engines however they
+want, as long as they follow the WEF specification.
 
 ## Goals
 
@@ -43,6 +46,13 @@ Experimental. The format and APIs can change.
 The repository contains the versioned format documents, a Rust reference
 engine, deterministic conformance fixtures, and API/HTML example sources.
 
+Reference sources live in `examples/` under their repository identity
+(`<language|multi>.wef.<site>`); site scrapers belong in a separate
+extensions repository (see `examples/README.md`). The machine-readable
+extension-repository layout — `repo.json`, generated `index.json`,
+`sources/<id>/` — is standardized in `crates/wef-spec/wef-0.1.0.md`,
+section 31.
+
 ## Implementing WEF in another language
 
 An engine only needs to:
@@ -63,11 +73,12 @@ The reference CLI validates packages, runs core operations, and replays source
 fixtures:
 
 ```text
-cargo run -p wef-cli -- validate sources/org.mangadex
-cargo run -p wef-cli -- test sources/org.mangadex
-cargo run -p wef-cli -- test sources/org.wef.html-example
+cargo run -p wef-cli -- validate examples/multi.wef.magadex
+cargo run -p wef-cli -- test examples/multi.wef.magadex
+cargo run -p wef-cli -- test examples/en.wef.html-example
 cargo run -p wef-cli -- test fixtures/conformance/core-source
 cargo run -p wef-cli -- test fixtures/conformance/0.0.2-source
+cargo run -p wef-cli -- repl
 ```
 
 `run` uses the production HTTP host. `test` uses `fixtures/*.json` request and

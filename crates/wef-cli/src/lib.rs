@@ -24,6 +24,7 @@ const USAGE: &str = r#"WEF reference CLI
 Usage:
   wef validate <path>
   wef lint <path> [--json]
+  wef lint-repo <dir> [--json]
   wef run [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> listing <id> [--page <number>] [--filters <json|@file>]
   wef run [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> search <query> [--page <number>] [--filters <json|@file>]
   wef run [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> update <manga-json|@file> [--existing-chapters <json|@file>] [--details-only|--chapters-only]
@@ -57,6 +58,7 @@ where
         "help" | "--help" | "-h" => Ok(USAGE.into()),
         "validate" => validate(&args[1..]),
         "lint" => lint(&args[1..]),
+        "lint-repo" => lint_repo(&args[1..]),
         "run" => run(&args[1..]),
         "test" => test(&args[1..]),
         "repl" | "interactive" | "shell" => repl::repl(&args[1..]),
@@ -80,9 +82,20 @@ fn validate(args: &[String]) -> Result<String, String> {
     ))
 }
 
+fn lint_repo(args: &[String]) -> Result<String, String> {
+    let (path, json_output) = path_and_json_flag(args, "lint-repo <dir> [--json]")?;
+    emit_diagnostics(wef_lint::lint_repo(path), json_output)
+}
+
 fn lint(args: &[String]) -> Result<String, String> {
     let (path, json_output) = path_and_json_flag(args, "lint <path> [--json]")?;
-    let diagnostics = wef_lint::lint_package(path);
+    emit_diagnostics(wef_lint::lint_package(path), json_output)
+}
+
+fn emit_diagnostics(
+    diagnostics: Vec<wef_lint::Diagnostic>,
+    json_output: bool,
+) -> Result<String, String> {
     let errors = diagnostics
         .iter()
         .filter(|diagnostic| matches!(diagnostic.severity, wef_lint::Severity::Error))
@@ -699,13 +712,16 @@ mod tests {
         let (session, remaining) = extract_session_option(&[
             "--session".into(),
             "cookies.json".into(),
-            "sources/org.mangadex".into(),
+            "examples/multi.wef.magadex".into(),
             "listing".into(),
             "latest".into(),
         ])
         .unwrap();
         assert_eq!(session, Some(PathBuf::from("cookies.json")));
-        assert_eq!(remaining, ["sources/org.mangadex", "listing", "latest"]);
+        assert_eq!(
+            remaining,
+            ["examples/multi.wef.magadex", "listing", "latest"]
+        );
     }
 
     #[test]
@@ -722,16 +738,26 @@ mod tests {
 
     #[test]
     fn runs_the_mangadex_fixture() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sources/org.mangadex");
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.magadex");
         let output = run_with_args(["test", path.to_str().unwrap()]).unwrap();
-        assert_eq!(output, "3 fixture(s) passed");
+        assert_eq!(output, "7 fixture(s) passed");
     }
 
     #[test]
     fn validates_the_mangadex_package() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sources/org.mangadex");
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.magadex");
         let output = run_with_args(["validate", path.to_str().unwrap()]).unwrap();
         assert!(output.contains("valid package:"));
-        assert!(output.contains("\"id\": \"org.mangadex\""));
+        assert!(output.contains("\"id\": \"multi.wef.magadex\""));
+    }
+
+    #[test]
+    fn lints_the_examples_repository() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let output = run_with_args(["lint-repo", path.to_str().unwrap()]).unwrap();
+        // Only warnings (base-URL selection); no errors.
+        assert!(output.contains("WEF102"));
     }
 }

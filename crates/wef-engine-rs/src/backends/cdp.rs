@@ -18,9 +18,9 @@ use wef_core::{BrowserCaptureTask, browser_capture_matches};
 /// Tasks are data-only and stay data-only: the host observes network bodies
 /// through the CDP `Network` domain, page-parsed values through a fixed
 /// `JSON.parse` tap, and embedded JSON through the `DOM` domain. The two
-/// JavaScript snippets below (`TAP_INSTALL`, `TAP_DRAIN`) are immutable constants — they contain
-/// no task data, no selectors, no URLs — so there is no code generation and
-/// source-supplied code is never evaluated.
+/// JavaScript snippets below (`TAP_INSTALL`, `TAP_DRAIN`) are immutable
+/// constants — they contain no task data, no selectors, no URLs — so there
+/// is no code generation and source-supplied code is never evaluated.
 pub struct CdpBrowserHost {
     debug_url: Url,
     policy: BrowserPolicy,
@@ -329,17 +329,10 @@ impl CdpBrowserHost {
         task: &wef_core::BrowserTask,
         wait_ms: u64,
     ) -> Result<BrowserRunResult, HostError> {
-        match task {
+        let payload = match task {
             wef_core::BrowserTask::Snapshot(task) => {
                 self.load(session, request)?;
-                let payload = snapshot_payload(session, &task.selector);
-                self.check_payload(&payload)?;
-                let (session_token, url) = self.finish_session(session, &request.url)?;
-                Ok(BrowserRunResult {
-                    url,
-                    payload,
-                    session: session_token,
-                })
+                snapshot_payload(session, &task.selector)
             }
             wef_core::BrowserTask::Capture(task) => {
                 self.load(session, request)?;
@@ -352,16 +345,16 @@ impl CdpBrowserHost {
                     json!({"expression": TAP_INSTALL, "returnByValue": true}),
                 );
                 let deadline = Instant::now() + Duration::from_millis(wait_ms);
-                let payload = self.run_single_capture(session, task, deadline)?;
-                self.check_payload(&payload)?;
-                let (session_token, url) = self.finish_session(session, &request.url)?;
-                Ok(BrowserRunResult {
-                    url,
-                    payload,
-                    session: session_token,
-                })
+                self.run_single_capture(session, task, deadline)?
             }
-        }
+        };
+        self.check_payload(&payload)?;
+        let (session_token, url) = self.finish_session(session, &request.url)?;
+        Ok(BrowserRunResult {
+            url,
+            payload,
+            session: session_token,
+        })
     }
 
     /// Navigates to `request.url`, or installs `request.html` with `url` as
@@ -482,8 +475,9 @@ fn current_history_url(history: &Value) -> Option<String> {
 }
 
 /// Bodies matched against one [`BrowserCaptureTask`] spec, in capture order
-/// and deduplicated by exact JSON equality (spec section 4). Owns a copy of
-/// the spec so callers never juggle borrows — ports just hold the object.
+/// and deduplicated by exact JSON equality (the payload-shapes rule). Owns
+/// a copy of the spec so callers never juggle borrows — ports just hold
+/// the object.
 ///
 /// With WEF 0.0.4 `capture.includeUnmatched`, rejected observations land in
 /// `raw` instead of being dropped; the payload wraps both lists (see
@@ -513,33 +507,29 @@ impl Capture {
     }
 
     fn push_candidate(&mut self, value: Value) {
-        if browser_capture_matches(&self.spec, &value) {
-            // Ports: `value.to_string()` is canonical-JSON serialization used
-            // only as a dedupe key (spec: "deduplicated by exact JSON equality").
-            let key = value.to_string();
-            if self.matches.len() >= 200 {
-                return;
-            }
-            if self.seen.insert(key) {
-                self.matches.push(value);
-            }
+        let matched = browser_capture_matches(&self.spec, &value);
+        if !matched && !self.include_unmatched {
             return;
         }
-        if self.include_unmatched {
-            let key = value.to_string();
-            if self.raw.len() >= 200 {
-                return;
-            }
-            if self.seen.insert(key) {
-                self.raw.push(value);
-            }
+        // Ports: `value.to_string()` is canonical-JSON serialization used
+        // only as a dedupe key (spec: "deduplicated by exact JSON equality").
+        let list = if matched {
+            &mut self.matches
+        } else {
+            &mut self.raw
+        };
+        if list.len() >= 200 {
+            return;
+        }
+        if self.seen.insert(value.to_string()) {
+            list.push(value);
         }
     }
 }
 
-/// Ports: without `includeUnmatched` the section-4 value passes through
-/// untouched (exact 0.0.3 shapes); with it, the payload is the
-/// `{"matched": …, "unmatched": […]}` envelope from WEF 0.0.4 section 4.
+/// Ports: without `includeUnmatched` the matched value passes through
+/// untouched; with it, the payload is the `{"matched": …, "unmatched": […]}`
+/// envelope.
 fn wrap_unmatched(matched: Option<Value>, capture: &Capture) -> Option<Value> {
     if !capture.include_unmatched {
         return matched;

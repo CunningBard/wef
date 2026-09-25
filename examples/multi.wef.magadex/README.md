@@ -5,8 +5,8 @@ title/chapter URL resolution, and preserves grouping/order metadata in chapter
 `extra`. The default language/content-rating selections are English and
 safe/suggestive/erotica; search callers can override them through filters.
 
-Run `scripts/mangadex-smoke.sh` only when you explicitly want one live public
-MangaDex request. Deterministic fixtures remain the default test path.
+Run `wef test` for the deterministic fixtures (the default test path);
+use the REPL for live requests.
 
 This package implements the four WEF 0.0.1 core operations against the public
 MangaDex API:
@@ -16,8 +16,7 @@ MangaDex API:
 - `getMangaUpdate` retrieves expanded manga metadata and English chapters.
 - `getPages` resolves MangaDex@Home full-quality image URLs.
 
-The implementation follows the API v5.13.1 OpenAPI document at
-[`../mangadex-api.yaml`](../mangadex-api.yaml).
+The implementation follows the MangaDex API v5 OpenAPI document.
 
 Consumers must visibly credit MangaDex and the scanlation groups exposed on
 chapter records, as required by the acceptable-use policy in that API document.
@@ -27,7 +26,7 @@ chapter records, as required by the acceptable-use policy in that API document.
 `fixtures/*.json` files can be run without network access with:
 
 ```text
-wef test sources/org.mangadex
+wef test examples/multi.wef.magadex
 ```
 
 Each fixture declares an operation input, the exact HTTP request/response

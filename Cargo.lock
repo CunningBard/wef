@@ -1996,6 +1996,9 @@ dependencies = [
 name = "wef-lint"
 version = "0.1.0"
 dependencies = [
+ "boa_ast",
+ "boa_interner",
+ "boa_parser",
  "serde",
  "serde_json",
  "wef-core",

@@ -71,7 +71,7 @@ pub fn repl(args: &[String]) -> Result<String, String> {
         );
     }
 
-    let mut session = Session::new(settings)?;
+    let mut session = Session::new(settings);
     session.session_path = session_path;
     session.store_path = store_path;
     if let Some(url) = cdp_url {
@@ -145,8 +145,8 @@ struct Session {
 }
 
 impl Session {
-    fn new(settings: Map<String, Value>) -> Result<Self, String> {
-        Ok(Self {
+    fn new(settings: Map<String, Value>) -> Self {
+        Self {
             host: HybridHost::new(),
             settings,
             session_path: None,
@@ -156,7 +156,7 @@ impl Session {
             selected: None,
             last_manga: Vec::new(),
             last_chapters: Vec::new(),
-        })
+        }
     }
 
     fn selected_name(&self) -> &str {
@@ -215,17 +215,11 @@ impl Session {
     }
 
     fn run_core(&mut self, operation: Operation, input: Value) -> Result<Value, String> {
-        let engine = Engine::with_host(self.host.clone()).with_settings(self.settings.clone());
-        engine.restore_store(&self.store);
-        let index = self
-            .selected
-            .filter(|index| *index < self.loaded.len())
-            .ok_or_else(|| "no source selected; `load <path>` first".to_owned())?;
-        let output = engine
-            .run(&self.loaded[index].package, operation, input)
-            .map_err(|error| error.to_string())?;
-        self.store = engine.store_snapshot();
-        Ok(output)
+        self.with_engine(|engine, package| {
+            engine
+                .run(package, operation, input)
+                .map_err(|error| error.to_string())
+        })
     }
 
     fn run_extension(
@@ -233,15 +227,27 @@ impl Session {
         operation: ExtensionOperation,
         input: Value,
     ) -> Result<Value, String> {
+        self.with_engine(|engine, package| {
+            engine
+                .run_extension(package, operation, input)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// Builds a fresh engine around the shared host, carries the store
+    /// snapshot across, and writes it back. Every command goes through here
+    /// so cookies, sessions, and storage survive the whole session.
+    fn with_engine(
+        &mut self,
+        run: impl FnOnce(&Engine, &Package) -> Result<Value, String>,
+    ) -> Result<Value, String> {
         let engine = Engine::with_host(self.host.clone()).with_settings(self.settings.clone());
         engine.restore_store(&self.store);
         let index = self
             .selected
             .filter(|index| *index < self.loaded.len())
             .ok_or_else(|| "no source selected; `load <path>` first".to_owned())?;
-        let output = engine
-            .run_extension(&self.loaded[index].package, operation, input)
-            .map_err(|error| error.to_string())?;
+        let output = run(&engine, &self.loaded[index].package)?;
         self.store = engine.store_snapshot();
         Ok(output)
     }
@@ -436,10 +442,13 @@ fn take_arg(rest: &str) -> Result<(String, &str), String> {
         return take_balanced(rest);
     }
     if first == '"' || first == '\'' {
-        let tokens = split_line(rest)?;
-        let token = tokens.first().cloned().unwrap_or_default();
-        // Find where the quoted token ends in the raw text by re-scanning.
+        // Span first (so a broken quote later in the line cannot fail this
+        // argument), then reuse the line splitter for escape handling.
         let end = scan_quoted_end(rest).ok_or_else(|| "unfinished quote".to_owned())?;
+        let token = split_line(&rest[..end])?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         return Ok((token, rest[end..].trim_start()));
     }
     match rest.find(char::is_whitespace) {
@@ -1100,7 +1109,7 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_unknown_commands_and_guards_empty_state() {
-        let mut session = Session::new(Map::new()).unwrap();
+        let mut session = Session::new(Map::new());
         assert!(dispatch(&mut session, "bogus").is_err());
         assert!(dispatch(&mut session, "").unwrap() == Action::Output(String::new()));
         assert!(dispatch(&mut session, "search x").is_err());

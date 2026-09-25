@@ -1,5 +1,12 @@
 import { requestJson } from "./api.js";
-import { CHAPTER_PAGE_SIZE, DEFAULT_CONTENT_RATINGS, DEFAULT_LANGUAGES, MANGA_PAGE_SIZE, SITE_BASE, UPLOADS_BASE } from "./config.js";
+import {
+    CHAPTER_PAGE_SIZE,
+    DEFAULT_CONTENT_RATINGS,
+    DEFAULT_LANGUAGES,
+    MANGA_PAGE_SIZE,
+    SITE_BASE,
+    UPLOADS_BASE,
+} from "./config.js";
 
 function localizedValue(values, preferredLanguage = "en") {
     if (!values || typeof values !== "object") {
@@ -147,7 +154,11 @@ function mapChapter(entity) {
         extra: {
             chapterId: entity.id,
             groupKey: volume ? `volume:${volume}` : "volume:unknown",
-            order: { volume: numericValue(volume), chapter: numericValue(number), readableAt: attributes.readableAt || attributes.publishAt },
+            order: {
+                volume: numericValue(volume),
+                chapter: numericValue(number),
+                readableAt: attributes.readableAt || attributes.publishAt,
+            },
         },
     };
 
@@ -182,7 +193,11 @@ function mapChapter(entity) {
 
 function selectedValues(filters, key, defaults) {
     const value = filters?.[key];
-    return Array.isArray(value) && value.every((item) => typeof item === "string") && value.length > 0
+    return (
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every((item) => typeof item === "string")
+    )
         ? value
         : defaults;
 }
@@ -271,7 +286,9 @@ async function fetchChapters(ctx, mangaId) {
         if (volume !== 0) return volume;
         const chapter = (rightOrder.chapter ?? -1) - (leftOrder.chapter ?? -1);
         if (chapter !== 0) return chapter;
-        return String(rightOrder.readableAt || "").localeCompare(String(leftOrder.readableAt || ""));
+        return String(rightOrder.readableAt || "").localeCompare(
+            String(leftOrder.readableAt || ""),
+        );
     });
     return chapters;
 }
@@ -330,9 +347,17 @@ export async function resolveUrl(ctx, input) {
     const chapterIndex = parts.indexOf("chapter");
     if (chapterIndex < 0 || !parts[chapterIndex + 1]) { return null; }
     const chapterKey = parts[chapterIndex + 1];
-    const payload = await requestJson(ctx, `/chapter/${encodeURIComponent(chapterKey)}`, { "includes[]": ["manga"] });
-    const manga = payload.data?.relationships?.find((relationship) => relationship.type === "manga");
-    if (!manga?.id) { ctx.fail("INVALID_RESPONSE", "MangaDex chapter response did not include its manga"); }
+    const payload = await requestJson(
+        ctx,
+        `/chapter/${encodeURIComponent(chapterKey)}`,
+        { "includes[]": ["manga"] },
+    );
+    const manga = payload.data?.relationships?.find(
+        (relationship) => relationship.type === "manga",
+    );
+    if (!manga?.id) {
+        ctx.fail("INVALID_RESPONSE", "MangaDex chapter response did not include its manga");
+    }
     return { type: "chapter", mangaKey: manga.id, chapterKey };
 }
 

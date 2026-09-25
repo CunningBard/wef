@@ -1,0 +1,94 @@
+{
+  "name": "MangaDex chapter pages",
+  "operation": "getPages",
+  "input": {
+    "manga": {
+      "key": "37816dc3-20a5-44b7-a889-b245b85e036d",
+      "title": "Ijimete Ijirarete",
+      "url": "https://mangadex.org/title/37816dc3-20a5-44b7-a889-b245b85e036d"
+    },
+    "chapter": {
+      "key": "7293c9d1-ba3a-45ea-a3a5-e453e257d172",
+      "name": "Ch. 5"
+    }
+  },
+  "http": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.mangadex.org/at-home/server/7293c9d1-ba3a-45ea-a3a5-e453e257d172",
+        "headers": {
+          "Accept": "application/json"
+        },
+        "query": {
+          "forcePort443": "true"
+        }
+      },
+      "response": {
+        "status": 200,
+        "url": "https://api.mangadex.org/x",
+        "headers": {},
+        "body": "{\"result\":\"ok\",\"baseUrl\":\"https:\\/\\/cmdxd98sb0x3yprd.mangadex.network\",\"chapter\":{\"hash\":\"9ea858372ab96f03202a49b2309a5a8b\",\"data\":[\"1-b6d0e1e8b2d4d73af52ec68cb07b9eb7203112cc4e46e5b0bb8ef6a5d8adb479.png\",\"2-ff8b468f08f7c07cd105c96a3b28860d57993980e9146fadf607c09a38f6e2ea.png\",\"3-1eaa4c4efe81c1571cffdf6de20bbb85ced66204897017007bf90e9c0b1cd880.png\",\"4-eb43d4881140353f72b5d6019ed3afbc266f7c34ed0a779dfe4c6c0a78519fdd.png\",\"5-3b5b930a4a3a853d835af489564fcfae7743b127b36474bb85cac152de7fe43a.png\",\"6-52cedd370ab191e4ceffe9d8a7e73e8c155fd81025197d0a54c7716110b74ed7.png\",\"7-87e949e7828667073456986be747accb2885bdabd660e7822fd149a4827cb2b5.png\",\"8-3baa0f1a69114073b258a6fd6531fc09b8d09d7af5ebae48faa7e001388f4d14.png\",\"9-db04faf09cbca2716f5e61d4b8522db2d4c924ea030499ccaa0150424d579b08.png\",\"10-34b2d74c1c027b85893ce6f9d9171292bf31f3ed9eb67883b7149f1a2f1b6648.png\",\"11-33d13b1f6ce88cd73579c304b5927ad311eca7c20806d995e1de2f8a90bccad8.png\",\"12-dabf0834d6a42ea1603098cd901d37667f6ca81f55641c897ddbdd3cb4eb2d7a.png\",\"13-6cffaba4704a2bfdd1e66e6eec38cef5055e1f20d06e92a149c336fd3d5033c5.png\",\"14-1359a23cb3dab4bf964825ede2da2d78a2034772176ae82834022323cd51138a.png\",\"15-97ebfdcaf1292b3f643e1b65ce4ddf4160882410e8336c06a134bd606e18a8da.png\",\"16-6c0fe280b1a339a2c06bad7c6c57c626de047b9b9ddf70840926fb1a43bc69d3.png\",\"17-0e42908e53f22497e091bec6101aabcd9d6b788b88165034aae08cedb07e2339.png\",\"18-513b5e0995368a1d33c2244bf3ca35579fb2a173446e53d400ad883544edec7e.png\",\"19-9dd1208f39c3f6a75d2be0f31ffaff762c1a6b79ecfe655a4f9ef18701871f5a.png\"],\"dataSaver\":[\"1-2f2456b1a9d07955532b99a41d127d9f0ddadb2fdc1586d65f3f0bfe2afc85cc.jpg\",\"2-346d0c444eab8484ddc0d290005e472f5be7343c431ac900e6feb196ccd46e61.jpg\",\"3-e97a774f5e8a36e1d23f0690274217091f95cdc827490f8f96f94fe570eac0b4.jpg\",\"4-ac693552dc3fed83f84c8d2140e1af656333f6986ad115c9c52215e6fa9454ff.jpg\",\"5-86f82117e0bc7947bfd5f47f4e748e01162472bc829fa90f7525b6ffdc13cc04.jpg\",\"6-c7c38b2cc3dc74035c0a408d9667d0bcedc052f747ffda1bee0ed4382be870c2.jpg\",\"7-e129a026b26edddaae44ed36237246650860f080c4a4577c5c3b38d2ca3db9d8.jpg\",\"8-8c46094d37f52e5193475500ff4a28ed60bf8fa16ec70e028028380337020ba6.jpg\",\"9-7a113fe458a90d934ee1e6d98d15afab742e86aec94a99754605320a6edc62d0.jpg\",\"10-a1e02f984ef3e76f56574b459bea54e6a6c9d144047b862999170a02b55e14d6.jpg\",\"11-ba6b5fc3e708d3c4b834b5e2279b71b9f18c768b0041e133a54ccad2588a31c5.jpg\",\"12-b58711030473f282419d6d4e6a816a738f777d660c7e8d4ea6ad2cd25bc088d6.jpg\",\"13-2c7590eca92f49d6fda9a89b79341cca66f5f34b6dcc512755392f8839a317a2.jpg\",\"14-488a4a7a91dd87ce8f52caf2b9107f5ca724fded7e8f01525c89c04bf1d38967.jpg\",\"15-aff0a1d113bb5332a743d40872390446905419e7f63520d588d1470068fcce00.jpg\",\"16-8a1fa271a84e46a84f9aa4c798bb3a25a7c9a7f97c4b765f42b76524818cc1c8.jpg\",\"17-fc31bd766a2c68e69fb140b2c883f65651c7a075bc3de3361218f9e7985827cc.jpg\",\"18-de3327761b904f0a4f1dc566309277e7c740401742ca4267bd3932e071fbe82e.jpg\",\"19-29096213db4d91f615f165ee5e5168430c200cfb7d2c4fc4eb6b6b85be6f36a8.jpg\"]}}"
+      }
+    }
+  ],
+  "expected": [
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/1-b6d0e1e8b2d4d73af52ec68cb07b9eb7203112cc4e46e5b0bb8ef6a5d8adb479.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/2-ff8b468f08f7c07cd105c96a3b28860d57993980e9146fadf607c09a38f6e2ea.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/3-1eaa4c4efe81c1571cffdf6de20bbb85ced66204897017007bf90e9c0b1cd880.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/4-eb43d4881140353f72b5d6019ed3afbc266f7c34ed0a779dfe4c6c0a78519fdd.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/5-3b5b930a4a3a853d835af489564fcfae7743b127b36474bb85cac152de7fe43a.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/6-52cedd370ab191e4ceffe9d8a7e73e8c155fd81025197d0a54c7716110b74ed7.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/7-87e949e7828667073456986be747accb2885bdabd660e7822fd149a4827cb2b5.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/8-3baa0f1a69114073b258a6fd6531fc09b8d09d7af5ebae48faa7e001388f4d14.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/9-db04faf09cbca2716f5e61d4b8522db2d4c924ea030499ccaa0150424d579b08.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/10-34b2d74c1c027b85893ce6f9d9171292bf31f3ed9eb67883b7149f1a2f1b6648.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/11-33d13b1f6ce88cd73579c304b5927ad311eca7c20806d995e1de2f8a90bccad8.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/12-dabf0834d6a42ea1603098cd901d37667f6ca81f55641c897ddbdd3cb4eb2d7a.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/13-6cffaba4704a2bfdd1e66e6eec38cef5055e1f20d06e92a149c336fd3d5033c5.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/14-1359a23cb3dab4bf964825ede2da2d78a2034772176ae82834022323cd51138a.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/15-97ebfdcaf1292b3f643e1b65ce4ddf4160882410e8336c06a134bd606e18a8da.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/16-6c0fe280b1a339a2c06bad7c6c57c626de047b9b9ddf70840926fb1a43bc69d3.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/17-0e42908e53f22497e091bec6101aabcd9d6b788b88165034aae08cedb07e2339.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/18-513b5e0995368a1d33c2244bf3ca35579fb2a173446e53d400ad883544edec7e.png"
+    },
+    {
+      "imageUrl": "https://cmdxd98sb0x3yprd.mangadex.network/data/9ea858372ab96f03202a49b2309a5a8b/19-9dd1208f39c3f6a75d2be0f31ffaff762c1a6b79ecfe655a4f9ef18701871f5a.png"
+    }
+  ]
+}

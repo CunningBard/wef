@@ -87,7 +87,12 @@ impl UreqHost {
             .map_err(|error| HostError::Message(format!("could not save cookie jar: {error}")))
     }
 
-    fn run_request<B>(&self, request: ureq::http::Request<B>) -> Result<HttpResponse, HostError>
+    /// Sends a built request without treating HTTP statuses as errors.
+    /// Callers read the body as text or bytes and map the shared parts.
+    fn send_built<B>(
+        &self,
+        request: ureq::http::Request<B>,
+    ) -> Result<ureq::http::Response<ureq::Body>, HostError>
     where
         B: AsSendBody,
     {
@@ -96,22 +101,18 @@ impl UreqHost {
             .configure_request(request)
             .http_status_as_error(false)
             .build();
-        let mut response = self
-            .agent
+        self.agent
             .run(request)
-            .map_err(|error| HostError::Message(error.to_string()))?;
+            .map_err(|error| HostError::Message(error.to_string()))
+    }
 
+    fn run_request<B>(&self, request: ureq::http::Request<B>) -> Result<HttpResponse, HostError>
+    where
+        B: AsSendBody,
+    {
+        let mut response = self.send_built(request)?;
         let url = response.get_uri().to_string();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                let value = value
-                    .to_str()
-                    .map_err(|error| HostError::Message(error.to_string()))?;
-                Ok((name.as_str().to_ascii_lowercase(), value.to_owned()))
-            })
-            .collect::<Result<BTreeMap<_, _>, HostError>>()?;
+        let headers = response_headers(&response)?;
         let body = response
             .body_mut()
             .with_config()
@@ -134,29 +135,9 @@ impl UreqHost {
     where
         B: AsSendBody,
     {
-        let request = self
-            .agent
-            .configure_request(request)
-            .http_status_as_error(false)
-            .build();
-        let mut response = self
-            .agent
-            .run(request)
-            .map_err(|error| HostError::Message(error.to_string()))?;
+        let mut response = self.send_built(request)?;
         let url = response.get_uri().to_string();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                Ok((
-                    name.as_str().to_ascii_lowercase(),
-                    value
-                        .to_str()
-                        .map_err(|error| HostError::Message(error.to_string()))?
-                        .to_owned(),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, HostError>>()?;
+        let headers = response_headers(&response)?;
         let body = response
             .body_mut()
             .with_config()
@@ -253,6 +234,24 @@ impl UreqHost {
         window.requests.push_back(now);
         Ok(())
     }
+}
+
+/// Lowercased response headers shared by text and binary requests.
+/// Ports: header names are case-insensitive everywhere; normalizing once
+/// keeps source-visible behavior identical across backends.
+fn response_headers(
+    response: &ureq::http::Response<ureq::Body>,
+) -> Result<BTreeMap<String, String>, HostError> {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            let value = value
+                .to_str()
+                .map_err(|error| HostError::Message(error.to_string()))?;
+            Ok((name.as_str().to_ascii_lowercase(), value.to_owned()))
+        })
+        .collect()
 }
 
 impl WefHost for UreqHost {

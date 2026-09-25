@@ -1,6 +1,6 @@
 {
   "wef": "0.0.1",
-  "id": "org.mangadex",
+  "id": "multi.wef.magadex",
   "name": "MangaDex",
   "version": "0.1.0",
   "entry": "source.js",

@@ -1,0 +1,62 @@
+{
+  "name": "MangaDex search filters",
+  "operation": "getFilters",
+  "input": null,
+  "http": [],
+  "expected": [
+    {
+      "default": [
+        "en"
+      ],
+      "id": "languages",
+      "name": "Translated languages",
+      "options": [
+        {
+          "id": "en",
+          "name": "English"
+        },
+        {
+          "id": "ja",
+          "name": "Japanese"
+        },
+        {
+          "id": "ko",
+          "name": "Korean"
+        },
+        {
+          "id": "zh",
+          "name": "Chinese"
+        }
+      ],
+      "type": "multi-select"
+    },
+    {
+      "default": [
+        "safe",
+        "suggestive",
+        "erotica"
+      ],
+      "id": "contentRatings",
+      "name": "Content ratings",
+      "options": [
+        {
+          "id": "safe",
+          "name": "Safe"
+        },
+        {
+          "id": "suggestive",
+          "name": "Suggestive"
+        },
+        {
+          "id": "erotica",
+          "name": "Erotica"
+        },
+        {
+          "id": "pornographic",
+          "name": "Pornographic"
+        }
+      ],
+      "type": "multi-select"
+    }
+  ]
+}

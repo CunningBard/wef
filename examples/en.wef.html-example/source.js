@@ -6,7 +6,10 @@ async function document(ctx, path) {
 }
 
 function mangaList(doc) {
-  return doc.selectAll('.manga').map(node => ({ key: node.attr('data-id'), title: node.select('.title').text(), url: `${BASE}/manga/${node.attr('data-id')}` }));
+  return doc.selectAll('.manga').map((node) => {
+      const id = node.attr('data-id');
+      return { key: id, title: node.select('.title').text(), url: `${BASE}/manga/${id}` };
+  });
 }
 
 async function mangaPage(ctx, path) {
