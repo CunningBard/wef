@@ -1,0 +1,1 @@
+{"name":"pages","operation":"getPages","input":{"manga":{"key":"m","title":"Manga"},"chapter":{"key":"c","name":"Chapter"}},"expected":[{"imageUrl":"https://example.org/page.jpg"}]}

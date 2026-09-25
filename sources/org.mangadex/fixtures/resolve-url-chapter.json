@@ -1,0 +1,36 @@
+{
+  "name": "resolveUrl maps a chapter URL to its manga and chapter keys",
+  "operation": "resolveUrl",
+  "input": {
+    "url": "https://mangadex.org/chapter/a1b2c3d4-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
+  },
+  "http": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.mangadex.org/chapter/a1b2c3d4-5e6f-4a5b-8c9d-0e1f2a3b4c5d",
+        "headers": {
+          "Accept": "application/json"
+        },
+        "query": {
+          "includes[]": ["manga"]
+        },
+        "body": null,
+        "browserSession": null
+      },
+      "response": {
+        "status": 200,
+        "url": "https://api.mangadex.org/chapter/a1b2c3d4-5e6f-4a5b-8c9d-0e1f2a3b4c5d",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"result\":\"ok\",\"data\":{\"id\":\"a1b2c3d4-5e6f-4a5b-8c9d-0e1f2a3b4c5d\",\"relationships\":[{\"id\":\"d7a90a8e-5f5a-4b3a-b3d2-7f2a4d5e6c77\",\"type\":\"manga\"}]}}"
+      }
+    }
+  ],
+  "expected": {
+    "type": "chapter",
+    "mangaKey": "d7a90a8e-5f5a-4b3a-b3d2-7f2a4d5e6c77",
+    "chapterKey": "a1b2c3d4-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
+  }
+}

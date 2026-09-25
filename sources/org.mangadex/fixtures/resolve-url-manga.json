@@ -1,0 +1,11 @@
+{
+  "name": "resolveUrl maps a manga title URL to its key",
+  "operation": "resolveUrl",
+  "input": {
+    "url": "https://mangadex.org/title/d7a90a8e-5f5a-4b3a-b3d2-7f2a4d5e6c77"
+  },
+  "expected": {
+    "type": "manga",
+    "mangaKey": "d7a90a8e-5f5a-4b3a-b3d2-7f2a4d5e6c77"
+  }
+}

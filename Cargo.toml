@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wef-core",
+    "crates/wef-engine-rs",
+    "crates/wef-lint",
+    "crates/wef-cli",
+]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
