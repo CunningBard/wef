@@ -1,0 +1,1 @@
+{"expected":{"candidates":[{"headers":{"Referer":"https://example.org/"},"url":"https://example.org/img/1.png?fallback=1"}],"headers":{"Referer":"https://example.org/"},"url":"https://example.org/img/1.png"},"input":{"context":"page","manga":{"key":"m1","title":"First"},"url":"https://example.org/img/1.png"},"name":"image request","operation":"getImageRequest"}

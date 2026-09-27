@@ -48,7 +48,7 @@ wire-identical to the `0.0.4` draft it finalizes).
 
 ### Reference sources (`sources/`)
 
-- `multi.wef.magadex`, `en.wef.html-example`: public-API and HTML scraping
+- `multi.wef.mangadex`, `en.wef.html-example`: public-API and HTML scraping
   patterns with fixtures.
 
 ### Security (`SECURITY.md`)

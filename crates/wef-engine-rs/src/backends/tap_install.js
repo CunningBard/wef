@@ -35,7 +35,12 @@ const origAtob = window.atob.bind(window);
 window.atob = function (value) {
 const decoded = origAtob(value);
 try {
-if (decoded.length <= 8192 && window.__wefTapBin.length < 20) {
+// High cap on purpose: cipher material (a handful of 24/32/256-byte
+// arrays) fires inside the same synchronous bundle-eval burst as dozens
+// of unrelated base64 decodes. A low cap drops the cipher whenever it
+// arrives after junk in one drain window — the host dedupes and byte-caps
+// downstream, so page-side generosity is safe.
+if (decoded.length <= 8192 && window.__wefTapBin.length < 500) {
 const bytes = [];
 for (let i = 0; i < decoded.length; i++) bytes.push(decoded.charCodeAt(i) & 255);
 window.__wefTapBin.push(bytes);

@@ -14,6 +14,7 @@ use std::{
 
 use serde_json::{Map, Value};
 
+use crate::host::check_allowed_url;
 use crate::wef_core::RateLimit;
 use crate::wef_core::{ImageRequest, ImageRequestCandidate};
 use crate::{
@@ -244,6 +245,7 @@ fn ureq_host_implements_wef_http_semantics() {
         ),
     ]);
     let mut host = UreqHost::with_timeout(Duration::from_secs(5));
+    host.set_allowed_urls(std::slice::from_ref(&base_url));
     let mut query = Map::new();
     query.insert("ids".into(), serde_json::json!(["a", "b"]));
     query.insert("q".into(), Value::String("hello world".into()));
@@ -306,9 +308,147 @@ fn ureq_host_rejects_non_string_query_values() {
 }
 
 #[test]
+fn ureq_host_rejects_urls_outside_the_baseurls_whitelist() {
+    let (base_url, _requests) = spawn_http_server(vec![http_response("200 OK", &[], "ok")]);
+    let mut host = UreqHost::with_timeout(Duration::from_secs(5));
+    host.set_allowed_urls(&[format!("{base_url}/api")]);
+
+    // Same host but outside the listed path prefix: denied, never sent.
+    let error = host
+        .request(HttpRequest {
+            method: None,
+            url: format!("{base_url}/other"),
+            headers: None,
+            query: None,
+            body: None,
+            browser_session: None,
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("not allowed"),
+        "unexpected error: {error}"
+    );
+
+    // Sibling prefix without a segment boundary: denied (`/apix` is not
+    // under `/api`), defeating naive string-prefix checks in reverse.
+    let error = host
+        .request(HttpRequest {
+            method: None,
+            url: format!("{base_url}/apix"),
+            headers: None,
+            query: None,
+            body: None,
+            browser_session: None,
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("not allowed"),
+        "unexpected error: {error}"
+    );
+
+    // Under the prefix: allowed.
+    let response = host
+        .request(HttpRequest {
+            method: None,
+            url: format!("{base_url}/api/items"),
+            headers: None,
+            query: None,
+            body: None,
+            browser_session: None,
+        })
+        .unwrap();
+    assert_eq!(response.body, "ok");
+}
+
+#[test]
+fn ureq_host_rejects_redirects_leaving_the_whitelist() {
+    let (other_url, other_requests) =
+        spawn_http_server(vec![http_response("200 OK", &[], "leaked")]);
+    let (base_url, _requests) = spawn_http_server(vec![http_response(
+        "302 Found",
+        &[("Location", &format!("{other_url}/collect"))],
+        "",
+    )]);
+    let mut host = UreqHost::with_timeout(Duration::from_secs(5));
+    host.set_allowed_urls(std::slice::from_ref(&base_url));
+
+    let error = host
+        .request(HttpRequest {
+            method: None,
+            url: format!("{base_url}/start"),
+            headers: None,
+            query: None,
+            body: None,
+            browser_session: None,
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("not allowed"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        other_requests.recv_timeout(Duration::from_secs(2)).is_err(),
+        "the off-allowlist hop must never run"
+    );
+}
+
+#[test]
+fn url_parse_splits_absolute_urls_for_source_routing() {
+    let (package, root) = package(
+        r#"
+            export async function getMangaList() { return { items: [], hasNextPage: false }; }
+            export async function search(ctx, input) {
+                const parts = ctx.url.parse(input.query);
+                return { items: [{ key: "x", title: "x", extra: { parts } }], hasNextPage: false };
+            }
+            export async function getMangaUpdate() { return { chapters: [] }; }
+            export async function getPages() { return []; }
+        "#,
+        &[],
+    );
+    let output = Engine::default()
+        .run(
+            &package,
+            Operation::Search,
+            serde_json::json!({"query": "https://example.org/manga/m1?page=2", "page": 1, "filters": {}}),
+        )
+        .unwrap();
+    assert_eq!(
+        output["items"][0]["extra"]["parts"],
+        serde_json::json!({
+            "scheme": "https",
+            "host": "example.org",
+            "port": null,
+            "path": "/manga/m1",
+            "query": "page=2",
+        })
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wildcard_entries_cover_one_dynamic_label() {
+    let allowed = vec!["https://*.mangadex.network".to_string()];
+    assert!(check_allowed_url(&allowed, "https://abc123.mangadex.network/data/x").is_ok());
+    // Bare domain, deeper nesting, suffix lookalikes, and wrong scheme fail.
+    for url in [
+        "https://mangadex.network/data",
+        "https://a.b.mangadex.network/data",
+        "https://abc123.mangadex.network.evil.com/data",
+        "http://abc123.mangadex.network/data",
+    ] {
+        assert!(
+            check_allowed_url(&allowed, url).is_err(),
+            "{url} must not match"
+        );
+    }
+}
+
+#[test]
 fn ureq_host_enforces_the_manifest_rate_limit() {
     let (base_url, requests) = spawn_http_server(vec![http_response("200 OK", &[], "ok")]);
     let mut host = UreqHost::with_timeout(Duration::from_secs(5));
+    host.set_allowed_urls(std::slice::from_ref(&base_url));
     host.set_rate_limit(Some(RateLimit {
         max_requests: 1,
         window_ms: 60_000,
@@ -350,6 +490,7 @@ fn image_fetch_retries_candidates_after_not_found() {
         http_response("200 OK", &[("X-Image", "candidate")], "image"),
     ]);
     let mut host = UreqHost::with_timeout(Duration::from_secs(5));
+    host.set_allowed_urls(std::slice::from_ref(&base_url));
     let response = host
         .fetch_image(&ImageRequest {
             url: format!("{base_url}/primary"),
@@ -598,8 +739,8 @@ fn browser_mock_enforces_policy_and_keeps_session_handoff_opaque() {
         serde_json::json!({}),
     );
     let mut host = MockBrowserHost::new(
-        BrowserPolicy::for_origins(["https://example.com".into()]),
-        [MockBrowserReply {
+        BrowserPolicy::for_origins(vec!["https://example.com".into()]),
+        vec![MockBrowserReply {
             url: "https://example.com/login".into(),
             payload: Some(serde_json::json!({"ready": true})),
         }],
@@ -639,13 +780,13 @@ fn browser_mock_enforces_policy_and_keeps_session_handoff_opaque() {
 
 #[test]
 fn browser_sessions_are_isolated_by_host_scope() {
-    let policy = BrowserPolicy::for_origins(["https://example.com".into()]);
+    let policy = BrowserPolicy::for_origins(vec!["https://example.com".into()]);
     let reply = MockBrowserReply {
         url: "https://example.com/login".into(),
         payload: None,
     };
-    let mut first = MockBrowserHost::new(policy.clone(), [reply.clone()]);
-    let mut second = MockBrowserHost::new(policy, [reply]);
+    let mut first = MockBrowserHost::new(policy.clone(), vec![reply.clone()]);
+    let mut second = MockBrowserHost::new(policy, vec![reply]);
     first.grant_consent();
     second.grant_consent();
     let first_session = first
@@ -688,10 +829,10 @@ fn browser_sessions_are_isolated_by_host_scope() {
 
 #[test]
 fn browser_mock_captures_redirect_payload_and_denies_policy_violations() {
-    let policy = BrowserPolicy::for_origins(["https://example.com".into()]);
+    let policy = BrowserPolicy::for_origins(vec!["https://example.com".into()]);
     let mut host = MockBrowserHost::new(
         policy,
-        [MockBrowserReply {
+        vec![MockBrowserReply {
             url: "https://example.com/final".into(),
             payload: Some(serde_json::json!({"captured":true})),
         }],
@@ -761,8 +902,8 @@ impl InteractiveBrowserSurface for FakeInteractiveSurface {
 #[test]
 fn interactive_host_enforces_policy_and_hands_off_opaque_sessions() {
     let mut host = InteractiveBrowserHost::new(
-        BrowserPolicy::for_origins(["https://example.com".into()]),
-        FakeInteractiveSurface,
+        BrowserPolicy::for_origins(vec!["https://example.com".into()]),
+        Box::new(FakeInteractiveSurface),
     );
     assert!(
         host.run_browser(crate::BrowserRunRequest {
@@ -778,11 +919,11 @@ fn interactive_host_enforces_policy_and_hands_off_opaque_sessions() {
     );
     let mut host = InteractiveBrowserHost::new(
         {
-            let mut policy = BrowserPolicy::for_origins(["https://example.com".into()]);
+            let mut policy = BrowserPolicy::for_origins(vec!["https://example.com".into()]);
             policy.consent_granted = true;
             policy
         },
-        FakeInteractiveSurface,
+        Box::new(FakeInteractiveSurface),
     );
     let session = host
         .run_browser(crate::BrowserRunRequest {
@@ -816,14 +957,14 @@ fn cdp_host_rejects_non_local_debugging_endpoints() {
     assert!(
         CdpBrowserHost::new(
             "http://example.com:9222",
-            BrowserPolicy::for_origins(["https://example.com".into()])
+            BrowserPolicy::for_origins(vec!["https://example.com".into()])
         )
         .is_err()
     );
     assert!(
         CdpBrowserHost::new(
             "http://127.0.0.1:9222",
-            BrowserPolicy::for_origins(["https://example.com".into()])
+            BrowserPolicy::for_origins(vec!["https://example.com".into()])
         )
         .is_ok()
     );
@@ -1131,8 +1272,8 @@ fn capture_task() -> crate::wef_core::BrowserTask {
 #[test]
 fn browser_task_request_validates_and_runs_through_mock() {
     let mut host = MockBrowserHost::new(
-        BrowserPolicy::for_origins(["https://example.com".into()]),
-        [MockBrowserReply {
+        BrowserPolicy::for_origins(vec!["https://example.com".into()]),
+        vec![MockBrowserReply {
             url: "https://example.com/app".into(),
             payload: Some(serde_json::json!({"result": {"items": [1]}})),
         }],
@@ -1155,8 +1296,8 @@ fn browser_task_request_validates_and_runs_through_mock() {
 #[test]
 fn browser_task_rejects_bad_fields() {
     let mut host = MockBrowserHost::new(
-        BrowserPolicy::for_origins(["https://example.com".into()]),
-        [],
+        BrowserPolicy::for_origins(vec!["https://example.com".into()]),
+        vec![],
     );
     host.grant_consent();
     // Empty selector.
@@ -1260,8 +1401,8 @@ fn engine_runs_a_task_based_browser_source_end_to_end() {
         serde_json::json!({}),
     );
     let mut host = MockBrowserHost::new(
-        BrowserPolicy::for_origins(["https://example.com".into()]),
-        [MockBrowserReply {
+        BrowserPolicy::for_origins(vec!["https://example.com".into()]),
+        vec![MockBrowserReply {
             url: "https://example.com/app".into(),
             payload: None,
         }],
@@ -1292,8 +1433,8 @@ fn engine_runs_a_task_based_browser_source_end_to_end() {
         serde_json::json!({}),
     );
     let mut host = MockBrowserHost::new(
-        BrowserPolicy::for_origins(["https://example.com".into()]),
-        [MockBrowserReply {
+        BrowserPolicy::for_origins(vec!["https://example.com".into()]),
+        vec![MockBrowserReply {
             url: "https://example.com/app".into(),
             payload: None,
         }],
@@ -1484,7 +1625,10 @@ fn boxed_host_constructor_runs_like_the_generic_one() {
         "#,
         &[],
     );
-    let host: Box<dyn WefHost> = Box::new(MockBrowserHost::new(BrowserPolicy::for_origins([]), []));
+    let host: Box<dyn WefHost> = Box::new(MockBrowserHost::new(
+        BrowserPolicy::for_origins(vec![]),
+        vec![],
+    ));
     let output = Engine::new(host)
         .run(
             &package,
@@ -1501,7 +1645,7 @@ fn cdp_session_requests_are_origin_scoped() {
     use crate::backends::cdp::mint_session_token;
 
     let (base_url, requests) = spawn_http_server(vec![http_response("200 OK", &[], "ok")]);
-    let mut policy = BrowserPolicy::for_origins([base_url.clone()]);
+    let mut policy = BrowserPolicy::for_origins(vec![base_url.clone()]);
     policy.consent_granted = true;
     let mut host = CdpBrowserHost::new("http://127.0.0.1:9222", policy).unwrap();
     let token = mint_session_token(0);

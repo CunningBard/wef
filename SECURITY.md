@@ -58,13 +58,13 @@ matching happens host-side in Rust, never in page code.
 - The endpoint must be an already-running **local** Chromium
   (`127.0.0.1`/`localhost`/`::1`); the host never launches or contacts a
   remote browser.
-- `run_browser` is policy-gated (consent, allowed origins, timeout cap).
+- `run_browser` is policy-gated (consent, `baseUrls` allowlist, timeout cap).
 - The cookie jar collected after a run holds the **whole profile**, so
-  session-authenticated requests are origin-checked against the policy
-  (`CdpBrowserHost::request`): the jar can never ride along to a
-  non-package URL. The unscoped collection is deliberate — session flows
-  span hosts (API host + static-asset host) — with containment enforced
-  at request time instead.
+  session-authenticated requests are allowlist-checked against the
+  manifest (`CdpBrowserHost::request` plus every redirect hop): the jar
+  can never ride along to a non-allowlisted URL. The unscoped collection
+  is deliberate — session flows span hosts (API host + static-asset
+  host) — with containment enforced at request time instead.
 - Session tokens are 128-bit OS random (`mint_session_token`), never
   sequential: tokens authenticate the jar, and sequential ids are
   guessable across sources sharing one host.
@@ -79,12 +79,14 @@ challenge material are sensitive files — persisted via the `--session` /
 
 ## Accepted risks
 
-- **SSRF by design.** `ctx.http.request` allows any `http(s)` URL (image
-  CDNs require it). Same tradeoff as Mihon. A malicious source can prod
-  the operator's LAN.
+- **SSRF confined to the allowlist.** `ctx.http.request` may only contact
+  URLs under the manifest `baseUrls`, every redirect hop included. A
+  malicious source can still prod hosts the manifest lists (reviewers:
+  treat intranet entries as a red flag), but unlike the pre-0.1.0 model it
+  cannot reach arbitrary LAN addresses.
 - **Trust-on-install exfiltration.** Secret settings and store values are
-  handed to sources on purpose; a malicious source sends them anywhere.
-  Install sources you trust.
+  handed to sources on purpose; a malicious source sends them to
+  allowlisted URLs. Install sources you trust.
 - **Downstream markup.** Descriptions/synopses return source HTML.
   Consuming apps must treat source output as untrusted markup (sanitize or
   render as text) — the engine does not strip it.
@@ -96,6 +98,8 @@ challenge material are sensitive files — persisted via the `--session` /
 A Kotlin/Swift port keeps this model only if it replicates: capability
 gating, resolve-then-`realpath`-then-prefix-check **in that order** for
 every module/resource load, fixed-byte page snippets with a no-task-data
-test, origin-checked session requests, random session tokens, secret
-redaction, and execution limits. Miss any one and the model has a hole —
-see each item's section above for the failure it prevents.
+test, the `baseUrls` whitelist on every request and redirect hop with
+credential stripping across origins, origin-checked session requests,
+random session tokens, secret redaction, and execution limits. Miss any
+one and the model has a hole — see each item's section above for the
+failure it prevents.

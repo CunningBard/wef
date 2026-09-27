@@ -7,14 +7,14 @@ use wef_core::ValidationError;
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
     #[error("invalid manifest at {path}: {source}")]
     ManifestParse {
         path: PathBuf,
         source: serde_json::Error,
     },
     #[error("invalid manifest: {0}")]
-    Manifest(#[from] ValidationError),
+    Manifest(ValidationError),
     #[error("invalid package: {message}")]
     InvalidPackage { message: String },
     #[error("package requires unavailable host capability {capability:?}")]

@@ -73,12 +73,13 @@ The reference CLI validates packages, runs core operations, and replays source
 fixtures:
 
 ```text
-cargo run -p wef-cli -- validate examples/multi.wef.magadex
-cargo run -p wef-cli -- test examples/multi.wef.magadex
+cargo run -p wef-cli -- validate examples/multi.wef.mangadex
+cargo run -p wef-cli -- test examples/multi.wef.mangadex
 cargo run -p wef-cli -- test examples/en.wef.html-example
 cargo run -p wef-cli -- test fixtures/conformance/core-source
 cargo run -p wef-cli -- test fixtures/conformance/0.0.2-source
 cargo run -p wef-cli -- repl
+cargo run -p wef-cli -- demo examples/multi.wef.mangadex
 ```
 
 `run` uses the production HTTP host. `test` uses `fixtures/*.json` request and

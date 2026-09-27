@@ -36,6 +36,7 @@ const HELP: &str = r#"commands:
   listing <id> [--page N] [--filters <json|@file>]
   update <manga> [--details-only|--chapters-only|--existing-chapters <json>]
   pages <manga> <chapter>
+  info <manga> [chapter]  show manga details, chapter list, and page info
   filters                show the source's search filters
   resolve <url>          resolve a URL to manga/chapter keys
   validate [id]          validate a loaded package
@@ -50,7 +51,8 @@ const HELP: &str = r#"commands:
   quit                   save state and exit (Ctrl-D works too)
 
 <manga> and <chapter> are inline JSON, @file, or an index into the last
-search/listing (`update 0`) or update (`pages 0 3`) output. Quotes group
+search/listing (`update 0`) or update (`pages 0 3`) output. `info` also
+accepts a bare manga or chapter key. Quotes group
 arguments: search "solo leveling". `--cdp`/`--session` stay mutually
 exclusive, like `wef run`: the browser profile owns cookies when CDP is on.
 "#;
@@ -319,7 +321,7 @@ impl HybridHost {
         let mut inner = self.inner.borrow_mut();
         if inner.cdp.is_none() {
             let url = inner.cdp_url.clone().ok_or(HostError::Unsupported)?;
-            let mut policy = BrowserPolicy::for_origins(inner.origins.iter().cloned());
+            let mut policy = BrowserPolicy::for_origins(inner.origins.iter().cloned().collect());
             policy.consent_granted = true;
             let host = CdpBrowserHost::new(&url, policy)?;
             eprintln!("[cdp] attaching to {url} (first browser use)");
@@ -374,6 +376,15 @@ impl WefHost for HybridHost {
         }
     }
 
+    /// Forwards the current manifest's entries: the engine is authoritative
+    /// per run, replacing (not unioning) whatever earlier loads granted.
+    fn set_allowed_urls(&mut self, urls: &[String]) {
+        self.inner.borrow_mut().http.set_allowed_urls(urls);
+        if let Some(cdp) = self.inner.borrow_mut().cdp.as_mut() {
+            cdp.set_allowed_urls(urls);
+        }
+    }
+
     fn run_browser(&mut self, request: BrowserRunRequest) -> Result<BrowserRunResult, HostError> {
         // Without a configured endpoint the capability is simply absent and
         // sources take their no-browser path — same as plain `wef run`.
@@ -404,6 +415,7 @@ fn dispatch(session: &mut Session, line: &str) -> Result<Action, String> {
         "listing" => cmd_listing(session, rest),
         "update" => cmd_update(session, rest),
         "pages" => cmd_pages(session, rest),
+        "info" => cmd_info(session, rest),
         "filters" => cmd_filters(session),
         "resolve" => cmd_resolve(session, rest),
         "validate" => cmd_validate(session, rest),
@@ -840,8 +852,124 @@ fn cmd_pages(session: &mut Session, rest: &str) -> Result<Action, String> {
     )))
 }
 
+/// Shows one manga (and optionally one chapter's pages) rendered for
+/// humans: details, chapter list, and the page-level fields. Unlike the
+/// other commands this also accepts bare manga/chapter keys, matching
+/// `wef info`.
+fn cmd_info(session: &mut Session, rest: &str) -> Result<Action, String> {
+    if rest.trim().is_empty() {
+        return Err(
+            "usage: info <manga-json|@file|index|key> [chapter-json|@file|index|key]".into(),
+        );
+    }
+    let (manga_arg, rest) = take_arg(rest)?;
+    let manga = resolve_key_or_reference(&manga_arg, &session.last_manga, "manga", "title")?;
+    let manga_key = manga
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or(&manga_arg)
+        .to_owned();
+    let output = session.run_core(
+        Operation::GetMangaUpdate,
+        json!({
+            "manga": manga,
+            "chapters": [],
+            "fetchDetails": true,
+            "fetchChapters": true,
+        }),
+    )?;
+    let update: wef_core::MangaUpdate =
+        serde_json::from_value(output).map_err(|error| format!("invalid update: {error}"))?;
+    let chapters = update.chapters.clone().unwrap_or_default();
+    session.last_chapters = chapters_json(&chapters);
+    if let Some(manga) = &update.manga {
+        session.last_manga = vec![serde_json::to_value(manga).map_err(|error| error.to_string())?];
+    }
+    let pages = if rest.trim().is_empty() {
+        None
+    } else {
+        let (chapter_arg, extra) = take_arg(rest)?;
+        if !extra.trim().is_empty() {
+            return Err("info accepts only manga and optional chapter arguments".into());
+        }
+        let chapter_value =
+            resolve_key_or_reference(&chapter_arg, &session.last_chapters, "chapter", "name")?;
+        let chapter_key = chapter_value
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or(&chapter_arg)
+            .to_owned();
+        let chapter = chapters
+            .iter()
+            .find(|chapter| chapter.key == chapter_key)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "chapter {chapter_key:?} not found in {} chapters",
+                    chapters.len()
+                )
+            })?;
+        let manga_value = match &update.manga {
+            Some(manga) => serde_json::to_value(manga).map_err(|error| error.to_string())?,
+            None => json!({"key": manga_key, "title": manga_key}),
+        };
+        let pages_value = session.run_core(
+            Operation::GetPages,
+            json!({
+                "manga": manga_value,
+                "chapter": serde_json::to_value(&chapter).map_err(|error| error.to_string())?,
+            }),
+        )?;
+        let pages: Vec<wef_core::Page> = serde_json::from_value(pages_value)
+            .map_err(|error| format!("invalid pages: {error}"))?;
+        Some((chapter, pages))
+    };
+    Ok(Action::Output(super::render_info(
+        &manga_key,
+        &update,
+        pages
+            .as_ref()
+            .map(|(chapter, pages)| (chapter, pages.as_slice())),
+    )))
+}
+
+/// Accepts everything [`resolve_reference`] does, plus a bare key — which
+/// becomes `{key, <name_field>: arg}` for commands that lead with a lookup.
+fn resolve_key_or_reference(
+    arg: &str,
+    slot: &[Value],
+    label: &str,
+    name_field: &str,
+) -> Result<Value, String> {
+    match resolve_reference(arg, slot, label) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if arg.parse::<usize>().is_ok()
+                || arg.starts_with('@')
+                || arg.starts_with('{')
+                || arg.starts_with('[')
+            {
+                return Err(error);
+            }
+            let mut object = Map::new();
+            object.insert("key".into(), Value::String(arg.into()));
+            object.insert(name_field.into(), Value::String(arg.into()));
+            Ok(Value::Object(object))
+        }
+    }
+}
+
+/// Serializes fresh chapters for index/`@file`-style resolution without
+/// touching the session slots (the caller owns slot updates).
+fn chapters_json(chapters: &[wef_core::Chapter]) -> Vec<Value> {
+    chapters
+        .iter()
+        .filter_map(|chapter| serde_json::to_value(chapter).ok())
+        .collect()
+}
+
 fn cmd_filters(session: &mut Session) -> Result<Action, String> {
-    let output = session.run_extension(ExtensionOperation::GetFilters, json!({}))?;
+    let output = session.run_extension(ExtensionOperation::GetFilters, Value::Null)?;
     pretty_json(&output).map(Action::Output)
 }
 
@@ -1022,6 +1150,24 @@ mod tests {
         );
         assert!(resolve_reference("5", &slot, "manga").is_err());
         assert!(resolve_reference("nope", &slot, "manga").is_err());
+    }
+
+    #[test]
+    fn resolves_bare_keys_alongside_references() {
+        let slot = vec![json!({"key": "a"}), json!({"key": "b"})];
+        assert_eq!(
+            resolve_key_or_reference("1", &slot, "manga", "title").unwrap(),
+            json!({"key": "b"})
+        );
+        assert_eq!(
+            resolve_key_or_reference("abc-123", &slot, "manga", "title").unwrap(),
+            json!({"key": "abc-123", "title": "abc-123"})
+        );
+        // Out-of-range indexes and broken JSON stay errors: only
+        // non-index, non-JSON, non-file tokens become bare keys.
+        assert!(resolve_key_or_reference("5", &slot, "manga", "title").is_err());
+        assert!(resolve_key_or_reference("{oops", &slot, "manga", "title").is_err());
+        assert!(resolve_key_or_reference("@missing.json", &slot, "manga", "title").is_err());
     }
 
     #[test]

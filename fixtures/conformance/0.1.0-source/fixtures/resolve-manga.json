@@ -1,0 +1,1 @@
+{"expected":{"mangaKey":"m1","type":"manga"},"input":{"url":"https://example.org/manga/m1"},"name":"resolve manga URL","operation":"resolveUrl"}

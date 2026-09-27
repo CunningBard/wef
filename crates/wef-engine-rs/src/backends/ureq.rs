@@ -2,12 +2,14 @@
 //!
 //! This is the `WefHost::request` implementation behind `ctx.http.request`
 //! on desktop. Portable behavior (what every backend repeats): HTTP(S) only,
+//! manifest-origin allowlist on the initial URL and every redirect hop,
 //! query encoding per [`crate::host::append_query`], header names
 //! lowercased on the way out, non-2xx statuses returned (never thrown),
 //! image candidates retried only after 404/410/transport errors. Desktop
-//! quirks (see `super::desktop`): redirect following, in-memory cookie jar
-//! with JSON import/export, 30 s default timeout, 5 MB body cap, and a
-//! sliding-window rate limiter fed by `set_rate_limit`.
+//! quirks (see `super::desktop`): manual redirect following (so each hop
+//! is origin-checked), in-memory cookie jar with JSON import/export, 30 s
+//! default timeout, 5 MB body cap, and a sliding-window rate limiter fed
+//! by `set_rate_limit`.
 
 use std::{
     cell::RefCell,
@@ -17,22 +19,49 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ureq::{AsSendBody, ResponseExt};
+use ureq::AsSendBody;
 use url::Url;
 use wef_core::{ImageRequest, RateLimit};
 
-use crate::host::{BinaryHttpResponse, HostError, HttpRequest, HttpResponse, WefHost};
+use crate::host::{
+    BinaryHttpResponse, HostError, HttpRequest, HttpResponse, WefHost, check_allowed_url,
+};
 
 /// A production HTTP host backed by a blocking [`ureq`] agent.
 ///
-/// The agent follows redirects and keeps cookies for the lifetime of this host.
-/// Keep one host attached to an engine for the duration of a source session if
-/// the source relies on either behavior.
+/// Redirects are followed manually (never by the agent) so every hop is
+/// origin-checked: session material and cookies can never ride along
+/// off-origin. Keep one host attached to an engine for the duration of a
+/// source session if the source relies on cookies.
 #[derive(Clone)]
 pub struct UreqHost {
     agent: ureq::Agent,
     max_response_body_bytes: u64,
     rate_window: Rc<RefCell<Option<RateWindow>>>,
+    allowed_urls: Vec<String>,
+}
+
+/// Redirect hops followed for one request before failing.
+const MAX_REDIRECT_HOPS: u32 = 10;
+
+/// One fully-fetched response: final status, headers, and body bytes after
+/// following redirects. Ports: same struct — method rewrite and hop cap
+/// below are contract, not desktop quirks.
+struct FetchedResponse {
+    status: u16,
+    url: String,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+/// Returns the next hop for a redirect status with a joinable `Location`,
+/// or `None` when this response is final. Ports: same status set.
+fn redirect_target(status: u16, headers: &BTreeMap<String, String>, current: &Url) -> Option<Url> {
+    if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let location = headers.get("location")?;
+    current.join(location).ok()
 }
 
 #[derive(Clone)]
@@ -57,11 +86,13 @@ impl UreqHost {
     pub fn with_timeout(timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
+            .max_redirects(0)
             .build();
         Self {
             agent: config.new_agent(),
             max_response_body_bytes: 5 * 1024 * 1024,
             rate_window: Rc::new(RefCell::new(None)),
+            allowed_urls: Vec::new(),
         }
     }
 
@@ -89,6 +120,8 @@ impl UreqHost {
 
     /// Sends a built request without treating HTTP statuses as errors.
     /// Callers read the body as text or bytes and map the shared parts.
+    /// This is one hop: redirect following lives in [`Self::fetch`], which
+    /// origin-checks every hop so session material never rides off-origin.
     fn send_built<B>(
         &self,
         request: ureq::http::Request<B>,
@@ -106,49 +139,118 @@ impl UreqHost {
             .map_err(|error| HostError::Message(error.to_string()))
     }
 
-    fn run_request<B>(&self, request: ureq::http::Request<B>) -> Result<HttpResponse, HostError>
-    where
-        B: AsSendBody,
-    {
-        let mut response = self.send_built(request)?;
-        let url = response.get_uri().to_string();
-        let headers = response_headers(&response)?;
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(self.max_response_body_bytes)
-            .read_to_string()
-            .map_err(|error| HostError::Message(error.to_string()))?;
+    /// Fetches one request, following redirects manually. Every hop —
+    /// initial URL included — MUST be an allowed origin; a hop leaving the
+    /// allowlist fails the whole request instead of leaking headers or
+    /// cookies. Ports: same loop — check, send, follow `Location` (301,
+    /// 302, 303 switch POST to GET; 307/308 preserve), cap hops.
+    fn fetch(
+        &self,
+        method: &str,
+        url: Url,
+        headers: BTreeMap<String, String>,
+        body: Option<String>,
+    ) -> Result<FetchedResponse, HostError> {
+        let mut current_url = url;
+        let mut current_method = method.to_owned();
+        let mut current_headers = headers;
+        let mut current_body = body;
+        let mut hops = 0u32;
+        loop {
+            check_allowed_url(&self.allowed_urls, current_url.as_str())?;
+            let mut builder = ureq::http::Request::builder()
+                .method(current_method.as_str())
+                .uri(current_url.as_str());
+            for (name, value) in &current_headers {
+                builder = builder.header(name, value);
+            }
+            let mut response = match current_body.clone() {
+                Some(text) => self.send_built(builder.body(text).map_err(|error| {
+                    HostError::Message(format!("invalid HTTP request: {error}"))
+                })?)?,
+                None => {
+                    self.send_built(builder.body(ureq::SendBody::none()).map_err(|error| {
+                        HostError::Message(format!("invalid HTTP request: {error}"))
+                    })?)?
+                }
+            };
+            let status = response.status().as_u16();
+            let response_headers = response_headers(&response)?;
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(self.max_response_body_bytes)
+                .read_to_vec()
+                .map_err(|error| HostError::Message(error.to_string()))?;
+            let Some(next_url) = redirect_target(status, &response_headers, &current_url) else {
+                return Ok(FetchedResponse {
+                    status,
+                    url: current_url.to_string(),
+                    headers: response_headers,
+                    body,
+                });
+            };
+            hops += 1;
+            if hops > MAX_REDIRECT_HOPS {
+                return Err(HostError::Message("too many redirects".into()));
+            }
+            if next_url.origin() != current_url.origin() {
+                // The hop stays inside the allowlist (checked next
+                // iteration), but credentials MUST NOT cross origins even
+                // between two listed ones.
+                current_headers.retain(|name, _| {
+                    !matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "authorization" | "proxy-authorization" | "cookie"
+                    )
+                });
+            }
+            if status == 303 && current_method != "HEAD"
+                || (status == 301 || status == 302) && current_method == "POST"
+            {
+                current_method = "GET".to_owned();
+                current_body = None;
+            }
+            current_url = next_url;
+        }
+    }
 
-        Ok(HttpResponse {
-            status: response.status().as_u16(),
+    fn run_request(&self, request: HttpRequest) -> Result<HttpResponse, HostError> {
+        let mut url = Url::parse(&request.url)
+            .map_err(|error| HostError::Message(format!("invalid HTTP URL: {error}")))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(HostError::Message(format!(
+                "unsupported HTTP URL scheme {:?}",
+                url.scheme()
+            )));
+        }
+        crate::host::append_query(&mut url, request.query.as_ref())?;
+        let fetched = self.fetch(
+            request.method.as_deref().unwrap_or("GET"),
             url,
-            headers,
-            body,
+            request.headers.unwrap_or_default(),
+            request.body,
+        )?;
+        Ok(HttpResponse {
+            status: fetched.status,
+            url: fetched.url,
+            headers: fetched.headers,
+            body: String::from_utf8(fetched.body)
+                .map_err(|error| HostError::Message(error.to_string()))?,
         })
     }
 
-    fn run_binary_request<B>(
+    fn fetch_binary(
         &self,
-        request: ureq::http::Request<B>,
-    ) -> Result<BinaryHttpResponse, HostError>
-    where
-        B: AsSendBody,
-    {
-        let mut response = self.send_built(request)?;
-        let url = response.get_uri().to_string();
-        let headers = response_headers(&response)?;
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(self.max_response_body_bytes)
-            .read_to_vec()
-            .map_err(|error| HostError::Message(error.to_string()))?;
+        url: Url,
+        headers: BTreeMap<String, String>,
+    ) -> Result<BinaryHttpResponse, HostError> {
+        let fetched = self.fetch("GET", url, headers, None)?;
         Ok(BinaryHttpResponse {
-            status: response.status().as_u16(),
-            url,
-            headers,
-            body,
+            status: fetched.status,
+            url: fetched.url,
+            headers: fetched.headers,
+            body: fetched.body,
         })
     }
 
@@ -166,19 +268,7 @@ impl UreqHost {
                 url.scheme()
             )));
         }
-        let mut builder = ureq::http::Request::builder()
-            .method("GET")
-            .uri(url.as_str());
-        if let Some(headers) = headers {
-            for (name, value) in headers {
-                builder = builder.header(name, value);
-            }
-        }
-        self.run_binary_request(
-            builder
-                .body(ureq::SendBody::none())
-                .map_err(|error| HostError::Message(format!("invalid HTTP request: {error}")))?,
-        )
+        self.fetch_binary(url, headers.unwrap_or_default())
     }
 
     /// Fetches an image request, trying ordered candidates only after a 404,
@@ -260,43 +350,7 @@ impl WefHost for UreqHost {
             return Err(HostError::Unsupported);
         }
         self.enforce_rate_limit()?;
-        let mut url = Url::parse(&request.url)
-            .map_err(|error| HostError::Message(format!("invalid HTTP URL: {error}")))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(HostError::Message(format!(
-                "unsupported HTTP URL scheme {:?}",
-                url.scheme()
-            )));
-        }
-        crate::host::append_query(&mut url, request.query.as_ref())?;
-
-        let method = request
-            .method
-            .as_deref()
-            .unwrap_or("GET")
-            .parse::<ureq::http::Method>()
-            .map_err(|error| HostError::Message(format!("invalid HTTP method: {error}")))?;
-        let mut builder = ureq::http::Request::builder()
-            .method(method)
-            .uri(url.as_str());
-        if let Some(headers) = request.headers {
-            for (name, value) in headers {
-                builder = builder.header(name, value);
-            }
-        }
-
-        match request.body {
-            Some(body) => {
-                self.run_request(builder.body(body).map_err(|error| {
-                    HostError::Message(format!("invalid HTTP request: {error}"))
-                })?)
-            }
-            None => {
-                self.run_request(builder.body(ureq::SendBody::none()).map_err(|error| {
-                    HostError::Message(format!("invalid HTTP request: {error}"))
-                })?)
-            }
-        }
+        self.run_request(request)
     }
 
     fn set_rate_limit(&mut self, limit: Option<RateLimit>) {
@@ -304,5 +358,13 @@ impl WefHost for UreqHost {
             policy,
             requests: VecDeque::new(),
         });
+    }
+
+    /// Installs the manifest `baseUrls` whitelist. Empty means deny-all:
+    /// the engine pushes the manifest list before every run, so an empty
+    /// set here is always a wiring bug, never "allow everything".
+    /// Ports: same fail-closed default.
+    fn set_allowed_urls(&mut self, urls: &[String]) {
+        self.allowed_urls = urls.to_vec();
     }
 }

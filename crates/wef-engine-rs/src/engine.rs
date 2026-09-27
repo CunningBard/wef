@@ -1,7 +1,6 @@
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc, time::Instant};
+use std::{collections::BTreeMap, rc::Rc, time::Instant};
 
 use boa_engine::{Context, JsString, JsValue, Source, error::JsError, module::Module};
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use wef_core::{
     Capability, Filter, ImageRequest, ImageRequestInput, MangaListInput, MangaPage, MangaUpdate,
@@ -11,7 +10,7 @@ use wef_core::{
 
 use crate::{
     error::EngineError,
-    host::{HostHandle, WefHost},
+    host::{HostHandle, StoreRegistry, WefHost},
     loader::JailedModuleLoader,
     package::Package,
     runtime::context_value,
@@ -83,7 +82,7 @@ impl ExtensionOperation {
 pub struct Engine {
     host: Option<HostHandle>,
     settings: serde_json::Map<String, Value>,
-    stores: crate::host::StoreRegistry,
+    stores: StoreRegistry,
 }
 
 /// Binary input for the privileged WEF 0.0.2 `transformImage` operation.
@@ -92,7 +91,7 @@ pub struct ImageTransformInput {
     pub request: ImageRequest,
     pub page: wef_core::Page,
     pub status: u16,
-    pub headers: std::collections::BTreeMap<String, String>,
+    pub headers: BTreeMap<String, String>,
     pub mime_type: Option<String>,
     pub body: Vec<u8>,
 }
@@ -114,30 +113,24 @@ impl Engine {
         Self {
             host: None,
             settings: serde_json::Map::new(),
-            stores: Rc::new(RefCell::new(BTreeMap::new())),
+            stores: StoreRegistry::new(),
         }
     }
 
-    /// Ports: prefer this constructor — it takes the host as a plain boxed
-    /// interface object (`Box<dyn WefHost>`), which maps 1:1 to
-    /// `init(host: WefHost)` in Kotlin/Swift. `with_host` is the same call
-    /// with Rust's generic spelling.
+    /// Ports: `init(host: WefHost)` in Kotlin/Swift — the host arrives as an
+    /// interface value; Rust spells that `Box<dyn WefHost>`.
     pub fn new(host: Box<dyn crate::host::WefHost>) -> Self {
         Self {
-            host: Some(Rc::new(RefCell::new(host))),
+            host: Some(HostHandle::new(host)),
             settings: serde_json::Map::new(),
-            stores: Rc::new(RefCell::new(BTreeMap::new())),
+            stores: StoreRegistry::new(),
         }
     }
 
-    /// Ports: `with_host` takes any `WefHost` implementation by value and
-    /// stores it behind the shared handle (see `HostHandle`). The `<H>`
-    /// generic is only Rust's way of saying "any host type" — Kotlin/Swift
-    /// ports declare `init(host: WefHost)` with an interface parameter.
-    pub fn with_host<H>(host: H) -> Self
-    where
-        H: WefHost + 'static,
-    {
+    /// Ports: same `init(host: WefHost)` call with any host implementation.
+    /// The `'static` bound only says the engine may keep the host for as
+    /// long as it lives — Kotlin/Swift hold the same reference.
+    pub fn with_host(host: impl WefHost + 'static) -> Self {
         Self::new(Box::new(host))
     }
 
@@ -147,63 +140,15 @@ impl Engine {
         self
     }
 
-    /// Returns the persistent store for one source (WEF 0.0.4 `ctx.store`),
-    /// creating it on first use. Ports: `stores.getOrPut(sourceId)`.
-    pub(crate) fn store_for(&self, package: &Package) -> crate::host::StoreHandle {
-        let id = package.manifest().id.clone();
-        let mut stores = self.stores.borrow_mut();
-        if let Some(handle) = stores.get(&id) {
-            return Rc::clone(handle);
-        }
-        let handle = Rc::new(RefCell::new(BTreeMap::new()));
-        stores.insert(id, Rc::clone(&handle));
-        handle
-    }
-
     /// Snapshots every source store as plain JSON (for CLI `--store` files).
-    /// Ports: serialize the same map the host persists across restarts.
     pub fn store_snapshot(&self) -> Value {
-        let stores = self.stores.borrow();
-        let mut root = serde_json::Map::new();
-        for (id, handle) in stores.iter() {
-            root.insert(
-                id.clone(),
-                Value::Object(
-                    handle
-                        .borrow()
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        Value::Object(root)
+        self.stores.snapshot()
     }
 
     /// Restores a snapshot produced by [`Engine::store_snapshot`]; malformed
-    /// entries are skipped, never fatal. Ports: load the persisted map.
+    /// entries are skipped, never fatal.
     pub fn restore_store(&self, snapshot: &Value) {
-        let Some(root) = snapshot.as_object() else {
-            return;
-        };
-        for (id, values) in root {
-            let Some(map) = values.as_object() else {
-                continue;
-            };
-            let mut stores = self.stores.borrow_mut();
-            let entry = stores
-                .entry(id.clone())
-                .or_insert_with(|| Rc::new(RefCell::new(BTreeMap::new())));
-            let mut store = entry.borrow_mut();
-            for (key, value) in map {
-                if !key.is_empty()
-                    && key.len() <= wef_core::store_limits::KEY_MAX_LEN
-                    && store.len() < wef_core::store_limits::MAX_KEYS
-                {
-                    store.insert(key.clone(), value.clone());
-                }
-            }
-        }
+        self.stores.restore(snapshot);
     }
 
     /// Evaluates a package and checks that every manifest-enabled operation is
@@ -262,12 +207,15 @@ impl Engine {
         });
         let js_input = JsValue::from_json(&value, &mut context)
             .map_err(|error| self.javascript_error(error, "transformImage", &mut context))?;
-        let object = js_input
-            .as_object()
-            .ok_or_else(|| EngineError::InvalidInput {
-                operation: "transformImage",
-                message: "could not create input object".into(),
-            })?;
+        let object = match js_input.as_object() {
+            Some(object) => object,
+            None => {
+                return Err(EngineError::InvalidInput {
+                    operation: "transformImage",
+                    message: "could not create input object".into(),
+                });
+            }
+        };
         object
             .set(
                 boa_engine::JsString::from("body"),
@@ -284,12 +232,15 @@ impl Engine {
         let result = function
             .call(&JsValue::undefined(), &[ctx, js_input], &mut context)
             .map_err(|error| self.javascript_error(error, "transformImage", &mut context))?;
-        let promise = result
-            .as_promise()
-            .ok_or_else(|| EngineError::InvalidResponse {
-                operation: "transformImage",
-                message: "operation must return a Promise".into(),
-            })?;
+        let promise = match result.as_promise() {
+            Some(promise) => promise,
+            None => {
+                return Err(EngineError::InvalidResponse {
+                    operation: "transformImage",
+                    message: "operation must return a Promise".into(),
+                });
+            }
+        };
         let result = promise
             .await_blocking(&mut context)
             .map_err(|error| self.javascript_error(error, "transformImage", &mut context))?;
@@ -299,12 +250,15 @@ impl Engine {
                 message: "operation exceeded host duration limit".into(),
             });
         }
-        let object = result
-            .as_object()
-            .ok_or_else(|| EngineError::InvalidResponse {
-                operation: "transformImage",
-                message: "expected object output".into(),
-            })?;
+        let object = match result.as_object() {
+            Some(object) => object,
+            None => {
+                return Err(EngineError::InvalidResponse {
+                    operation: "transformImage",
+                    message: "expected object output".into(),
+                });
+            }
+        };
         let mime_type = object
             .get(boa_engine::JsString::from("mimeType"), &mut context)
             .map_err(|error| self.javascript_error(error, "transformImage", &mut context))?
@@ -356,7 +310,7 @@ impl Engine {
             });
         }
         self.validate_extension_input(operation, &input)?;
-        let settings = if matches!(operation, ExtensionOperation::GetSettings) {
+        let settings = if operation == ExtensionOperation::GetSettings {
             self.settings.clone()
         } else {
             self.effective_settings(package)?
@@ -371,24 +325,8 @@ impl Engine {
     /// Scrubs secret-equivalent values (host settings + this source's store)
     /// from source errors. Ports: same two-map scrub after every invocation.
     fn redact_error(&self, error: EngineError, package: &Package) -> EngineError {
-        let error = redact_settings_error(error, &self.settings);
-        let snapshot = self.store_snapshot_for(&package.manifest().id);
-        redact_store_error(error, &snapshot)
-    }
-
-    /// Copies one source's store for diagnostics-safe handling.
-    fn store_snapshot_for(&self, source_id: &str) -> serde_json::Map<String, Value> {
-        self.stores
-            .borrow()
-            .get(source_id)
-            .map(|handle| {
-                handle
-                    .borrow()
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let snapshot = self.stores.snapshot_for(&package.manifest().id);
+        redact_error(error, &self.settings, &snapshot)
     }
 
     /// Builds the `ctx` value for one invocation, attaching the source store
@@ -400,14 +338,14 @@ impl Engine {
         settings: &serde_json::Map<String, Value>,
         context: &mut Context,
     ) -> Result<JsValue, EngineError> {
-        let store = package
-            .manifest()
-            .requires
-            .iter()
-            .any(|capability| matches!(capability, Capability::Storage))
-            .then(|| self.store_for(package));
+        let manifest = package.manifest();
+        let store = if manifest.requires.contains(&Capability::Storage) {
+            Some(self.stores.store_for(&manifest.id))
+        } else {
+            None
+        };
         context_value(
-            package.manifest(),
+            manifest,
             self.host.as_ref(),
             settings,
             store.as_ref(),
@@ -436,7 +374,7 @@ impl Engine {
         context
             .runtime_limits_mut()
             .set_loop_iteration_limit(1_000_000);
-        let source = Source::from_filepath(package.entry_path())?;
+        let source = Source::from_filepath(package.entry_path()).map_err(EngineError::Io)?;
         let module = Module::parse(source, None, &mut context)
             .map_err(|error| self.javascript_error(error, operation, &mut context))?;
         loader.insert(package.entry_path().to_path_buf(), module.clone());
@@ -470,22 +408,28 @@ impl Engine {
                 &mut context,
             )
             .map_err(|error| self.javascript_error(error, export_name, &mut context))?;
-        let promise = result
-            .as_promise()
-            .ok_or_else(|| EngineError::InvalidResponse {
-                operation: export_name,
-                message: "operation must return a Promise".into(),
-            })?;
+        let promise = match result.as_promise() {
+            Some(promise) => promise,
+            None => {
+                return Err(EngineError::InvalidResponse {
+                    operation: export_name,
+                    message: "operation must return a Promise".into(),
+                });
+            }
+        };
         let result = promise
             .await_blocking(&mut context)
             .map_err(|error| self.javascript_error(error, export_name, &mut context))?;
-        result
+        let json = result
             .to_json(&mut context)
-            .map_err(|error| self.javascript_error(error, export_name, &mut context))?
-            .ok_or_else(|| EngineError::InvalidResponse {
+            .map_err(|error| self.javascript_error(error, export_name, &mut context))?;
+        match json {
+            Some(json) => Ok(json),
+            None => Err(EngineError::InvalidResponse {
                 operation: export_name,
                 message: "operation returned undefined".into(),
-            })
+            }),
+        }
     }
 
     fn effective_settings(
@@ -496,16 +440,21 @@ impl Engine {
             return Ok(self.settings.clone());
         }
         let schema = self.invoke(package, "getSettings", &Value::Null, &self.settings)?;
-        let settings: Vec<Setting> =
-            serde_json::from_value(schema).map_err(|error| EngineError::InvalidResponse {
-                operation: "getSettings",
-                message: format!("expected Setting[]: {error}"),
-            })?;
+        let settings: Vec<Setting> = match serde_json::from_value(schema) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return Err(EngineError::InvalidResponse {
+                    operation: "getSettings",
+                    message: format!("expected Setting[]: {error}"),
+                });
+            }
+        };
         let mut effective = self.settings.clone();
         for setting in settings {
-            if !effective.contains_key(&setting.id)
-                && let Some(default) = setting_default(&setting.kind)
-            {
+            if effective.contains_key(&setting.id) {
+                continue;
+            }
+            if let Some(default) = setting_default(&setting.kind) {
                 effective.insert(setting.id, default);
             }
         }
@@ -521,33 +470,43 @@ impl Engine {
         let exported = module
             .get_value(JsString::from(export_name), context)
             .map_err(|error| self.javascript_error(error, export_name, context))?;
-        exported
-            .as_object()
-            .filter(|object| object.is_callable())
-            .ok_or(EngineError::MissingExport {
+        let object = match exported.as_object() {
+            Some(object) => object,
+            None => {
+                return Err(EngineError::MissingExport {
+                    operation: export_name,
+                });
+            }
+        };
+        if !object.is_callable() {
+            return Err(EngineError::MissingExport {
                 operation: export_name,
-            })
+            });
+        }
+        Ok(object)
     }
 
     fn validate_runtime_capabilities(&self, package: &Package) -> Result<(), EngineError> {
         if let Some(host) = &self.host {
-            host.borrow_mut().set_rate_limit(
-                package
-                    .manifest()
-                    .network
-                    .as_ref()
-                    .and_then(|network| network.rate_limit.clone()),
-            );
+            let rate_limit = match package.manifest().network.as_ref() {
+                Some(network) => network.rate_limit.clone(),
+                None => None,
+            };
+            host.set_rate_limit(rate_limit);
+            // The manifest allowlist is authoritative per run: plain HTTP,
+            // image fetches, and every redirect hop may only contact URLs
+            // under these entries. Ports: same push before dispatch.
+            host.set_allowed_urls(&package.manifest().base_urls);
         }
         for capability in &package.manifest().requires {
             if self.host.is_none() {
-                let capability = match capability {
-                    Capability::Http => Some("http"),
-                    Capability::Browser => Some("browser"),
-                    _ => None,
-                };
-                if let Some(capability) = capability {
-                    return Err(EngineError::MissingHostCapability { capability });
+                if *capability == Capability::Http {
+                    return Err(EngineError::MissingHostCapability { capability: "http" });
+                }
+                if *capability == Capability::Browser {
+                    return Err(EngineError::MissingHostCapability {
+                        capability: "browser",
+                    });
                 }
             }
         }
@@ -562,7 +521,8 @@ impl Engine {
     ) -> Result<(), EngineError> {
         match operation {
             Operation::GetMangaList => {
-                let input: MangaListInput = parse_input(input, operation.export_name())?;
+                let input: MangaListInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(operation.export_name(), error.to_string()))?;
                 if input.page == 0 {
                     return Err(invalid_input(
                         operation.export_name(),
@@ -577,7 +537,8 @@ impl Engine {
                 }
             }
             Operation::Search => {
-                let input: SearchInput = parse_input(input, operation.export_name())?;
+                let input: SearchInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(operation.export_name(), error.to_string()))?;
                 if input.page == 0 {
                     return Err(invalid_input(
                         operation.export_name(),
@@ -586,12 +547,15 @@ impl Engine {
                 }
             }
             Operation::GetMangaUpdate => {
-                parse_input::<MangaUpdateInput>(input, operation.export_name())?
+                let input: MangaUpdateInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(operation.export_name(), error.to_string()))?;
+                input
                     .validate()
-                    .map_err(|error| invalid_input(operation.export_name(), error.to_string()))?
+                    .map_err(|error| invalid_input(operation.export_name(), error.to_string()))?;
             }
             Operation::GetPages => {
-                let input: PagesInput = parse_input(input, operation.export_name())?;
+                let input: PagesInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(operation.export_name(), error.to_string()))?;
                 input
                     .manga
                     .validate()
@@ -611,29 +575,47 @@ impl Engine {
         input: &Value,
         output: &Value,
     ) -> Result<(), EngineError> {
-        let invalid = |message: String| EngineError::InvalidResponse {
-            operation: operation.export_name(),
-            message,
-        };
+        let name = operation.export_name();
         match operation {
             Operation::GetMangaList | Operation::Search => {
-                let page: MangaPage = serde_json::from_value(output.clone())
-                    .map_err(|e| invalid(format!("expected MangaPage: {e}")))?;
-                page.validate().map_err(|e| invalid(e.to_string()))?;
+                let page: MangaPage = match serde_json::from_value(output.clone()) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        return Err(invalid_response(
+                            name,
+                            format!("expected MangaPage: {error}"),
+                        ));
+                    }
+                };
+                page.validate()
+                    .map_err(|error| invalid_response(name, error.to_string()))?;
             }
             Operation::GetMangaUpdate => {
-                let input: MangaUpdateInput = parse_input(input, operation.export_name())?;
-                let update: MangaUpdate = serde_json::from_value(output.clone())
-                    .map_err(|e| invalid(format!("expected MangaUpdate: {e}")))?;
+                let input: MangaUpdateInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(name, error.to_string()))?;
+                let update: MangaUpdate = match serde_json::from_value(output.clone()) {
+                    Ok(update) => update,
+                    Err(error) => {
+                        return Err(invalid_response(
+                            name,
+                            format!("expected MangaUpdate: {error}"),
+                        ));
+                    }
+                };
                 update
                     .validate_for(&input)
-                    .map_err(|e| invalid(e.to_string()))?;
+                    .map_err(|error| invalid_response(name, error.to_string()))?;
             }
             Operation::GetPages => {
-                let pages: Vec<wef_core::Page> = serde_json::from_value(output.clone())
-                    .map_err(|e| invalid(format!("expected Page[]: {e}")))?;
+                let pages: Vec<wef_core::Page> = match serde_json::from_value(output.clone()) {
+                    Ok(pages) => pages,
+                    Err(error) => {
+                        return Err(invalid_response(name, format!("expected Page[]: {error}")));
+                    }
+                };
                 for page in pages {
-                    page.validate().map_err(|e| invalid(e.to_string()))?;
+                    page.validate()
+                        .map_err(|error| invalid_response(name, error.to_string()))?;
                 }
             }
         }
@@ -645,23 +627,28 @@ impl Engine {
         operation: ExtensionOperation,
         input: &Value,
     ) -> Result<(), EngineError> {
+        let name = operation.export_name();
         match operation {
             ExtensionOperation::GetSettings | ExtensionOperation::GetFilters => {
                 if !input.is_null() {
-                    return Err(invalid_input(operation.export_name(), "input must be null"));
+                    return Err(invalid_input(name, "input must be null"));
                 }
             }
             ExtensionOperation::ResolveUrl => {
-                parse_input::<ResolveUrlInput>(input, operation.export_name())?;
+                let _: ResolveUrlInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(name, error.to_string()))?;
             }
             ExtensionOperation::GetImageRequest => {
-                parse_input::<ImageRequestInput>(input, operation.export_name())?;
+                let _: ImageRequestInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(name, error.to_string()))?;
             }
             ExtensionOperation::MigrateMangaKey => {
-                parse_input::<MigrateMangaKeyInput>(input, operation.export_name())?;
+                let _: MigrateMangaKeyInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(name, error.to_string()))?;
             }
             ExtensionOperation::MigrateChapterKey => {
-                parse_input::<MigrateChapterKeyInput>(input, operation.export_name())?;
+                let _: MigrateChapterKeyInput = serde_json::from_value(input.clone())
+                    .map_err(|error| invalid_input(name, error.to_string()))?;
             }
         }
         Ok(())
@@ -672,45 +659,91 @@ impl Engine {
         operation: ExtensionOperation,
         output: &Value,
     ) -> Result<(), EngineError> {
-        let invalid = |message: String| EngineError::InvalidResponse {
-            operation: operation.export_name(),
-            message,
-        };
+        let name = operation.export_name();
         match operation {
             ExtensionOperation::GetSettings => {
-                let settings: Vec<Setting> = serde_json::from_value(output.clone())
-                    .map_err(|e| invalid(format!("expected Setting[]: {e}")))?;
-                validate_unique_ids(
-                    settings.iter().map(|setting| setting.id.as_str()),
-                    "setting",
-                    &invalid,
-                )?;
+                let settings: Vec<Setting> = match serde_json::from_value(output.clone()) {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        return Err(invalid_response(
+                            name,
+                            format!("expected Setting[]: {error}"),
+                        ));
+                    }
+                };
+                let mut ids: Vec<String> = Vec::new();
+                for setting in &settings {
+                    ids.push(setting.id.clone());
+                }
+                validate_unique_ids("setting", &ids, name)?;
             }
             ExtensionOperation::GetFilters => {
-                let filters: Vec<Filter> = serde_json::from_value(output.clone())
-                    .map_err(|e| invalid(format!("expected Filter[]: {e}")))?;
-                validate_filters(&filters, &invalid)?;
+                let filters: Vec<Filter> = match serde_json::from_value(output.clone()) {
+                    Ok(filters) => filters,
+                    Err(error) => {
+                        return Err(invalid_response(
+                            name,
+                            format!("expected Filter[]: {error}"),
+                        ));
+                    }
+                };
+                validate_filters(&filters, name)?;
             }
             ExtensionOperation::ResolveUrl => {
                 if !output.is_null() {
-                    serde_json::from_value::<ResolvedUrl>(output.clone())
-                        .map_err(|e| invalid(format!("expected resolved URL or null: {e}")))?;
+                    let _: ResolvedUrl = match serde_json::from_value(output.clone()) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            return Err(invalid_response(
+                                name,
+                                format!("expected resolved URL or null: {error}"),
+                            ));
+                        }
+                    };
                 }
             }
             ExtensionOperation::GetImageRequest => {
-                let request: ImageRequest = serde_json::from_value(output.clone())
-                    .map_err(|e| invalid(format!("expected ImageRequest: {e}")))?;
-                if request.url.is_empty()
-                    || request.candidates.as_ref().is_some_and(|candidates| {
-                        candidates.iter().any(|candidate| candidate.url.is_empty())
-                    })
-                {
-                    return Err(invalid("image request URLs must not be empty".into()));
+                let request: ImageRequest = match serde_json::from_value(output.clone()) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Err(invalid_response(
+                            name,
+                            format!("expected ImageRequest: {error}"),
+                        ));
+                    }
+                };
+                if request.url.is_empty() {
+                    return Err(invalid_response(
+                        name,
+                        "image request URLs must not be empty".into(),
+                    ));
+                }
+                if let Some(candidates) = request.candidates.as_ref() {
+                    for candidate in candidates {
+                        if candidate.url.is_empty() {
+                            return Err(invalid_response(
+                                name,
+                                "image request URLs must not be empty".into(),
+                            ));
+                        }
+                    }
                 }
             }
             ExtensionOperation::MigrateMangaKey | ExtensionOperation::MigrateChapterKey => {
-                if output.as_str().is_none_or(str::is_empty) {
-                    return Err(invalid("expected a non-empty key string".into()));
+                let key = match output.as_str() {
+                    Some(key) => key,
+                    None => {
+                        return Err(invalid_response(
+                            name,
+                            "expected a non-empty key string".into(),
+                        ));
+                    }
+                };
+                if key.is_empty() {
+                    return Err(invalid_response(
+                        name,
+                        "expected a non-empty key string".into(),
+                    ));
                 }
             }
         }
@@ -723,35 +756,44 @@ impl Engine {
         operation: &'static str,
         context: &mut Context,
     ) -> EngineError {
-        if error
-            .as_native()
-            .is_some_and(boa_engine::error::JsNativeError::is_runtime_limit)
-        {
+        let hit_execution_limit = match error.as_native() {
+            Some(native) => boa_engine::error::JsNativeError::is_runtime_limit(native),
+            None => false,
+        };
+        if hit_execution_limit {
             return EngineError::InvalidResponse {
                 operation,
                 message: "operation exceeded host execution limit".into(),
             };
         }
         let opaque = error.to_opaque(context);
-        if let Ok(Some(Value::Object(object))) = opaque.to_json(context)
-            && object
-                .get("__wefError")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
+        let error_object = match opaque.to_json(context) {
+            Ok(Some(Value::Object(object))) => object,
+            _ => {
+                return EngineError::Javascript {
+                    operation,
+                    message: error.to_string(),
+                };
+            }
+        };
+        if error_object
+            .get("__wefError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
         {
             return EngineError::Source {
                 operation,
-                code: object
+                code: error_object
                     .get("code")
                     .and_then(Value::as_str)
                     .unwrap_or("SOURCE_ERROR")
                     .into(),
-                message: object
+                message: error_object
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("source reported an error")
                     .into(),
-                details: object.get("details").cloned(),
+                details: error_object.get("details").cloned(),
             };
         }
         EngineError::Javascript {
@@ -761,14 +803,6 @@ impl Engine {
     }
 }
 
-fn parse_input<T: DeserializeOwned>(
-    input: &Value,
-    operation: &'static str,
-) -> Result<T, EngineError> {
-    serde_json::from_value(input.clone())
-        .map_err(|error| invalid_input(operation, error.to_string()))
-}
-
 fn invalid_input(operation: &'static str, message: impl Into<String>) -> EngineError {
     EngineError::InvalidInput {
         operation,
@@ -776,67 +810,58 @@ fn invalid_input(operation: &'static str, message: impl Into<String>) -> EngineE
     }
 }
 
-fn redact_settings_error(
+fn invalid_response(operation: &'static str, message: String) -> EngineError {
+    EngineError::InvalidResponse { operation, message }
+}
+
+/// Scrubs secret-equivalent values (host settings + this source's store
+/// entries) from source errors. Ports: same two-map scrub after every
+/// invocation — replace every secret string in `message`, and blank any
+/// `details` object field named like a secret key.
+fn redact_error(
     mut error: EngineError,
     settings: &serde_json::Map<String, Value>,
-) -> EngineError {
-    redact_error_values(&mut error, settings, &serde_json::Map::new());
-    error
-}
-
-/// Ports: same scrub as settings, but for one source's store entries —
-/// secret-equivalent values never reach diagnostics. `store` is the source's
-/// own key/value map (empty when the source declares no storage).
-fn redact_store_error(
-    mut error: EngineError,
     store: &serde_json::Map<String, Value>,
 ) -> EngineError {
-    redact_error_values(&mut error, &serde_json::Map::new(), store);
+    if let EngineError::Source {
+        message, details, ..
+    } = &mut error
+    {
+        for secrets in [settings, store] {
+            for value in secrets.values() {
+                if let Some(secret) = value.as_str() {
+                    *message = message.replace(secret, "[REDACTED]");
+                }
+            }
+        }
+        if let Some(details) = details {
+            redact_json_value(details, settings, store);
+        }
+    }
     error
 }
 
-fn redact_error_values(
-    error: &mut EngineError,
+fn redact_json_value(
+    value: &mut Value,
     settings: &serde_json::Map<String, Value>,
     store: &serde_json::Map<String, Value>,
 ) {
-    fn redact(
-        value: &mut Value,
-        settings: &serde_json::Map<String, Value>,
-        store: &serde_json::Map<String, Value>,
-    ) {
-        match value {
-            Value::Object(object) => {
-                for (key, value) in object {
-                    if settings.contains_key(key) || store.contains_key(key) {
-                        *value = Value::String("[REDACTED]".into());
-                    } else {
-                        redact(value, settings, store);
-                    }
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if settings.contains_key(key) || store.contains_key(key) {
+                    *value = Value::String("[REDACTED]".into());
+                } else {
+                    redact_json_value(value, settings, store);
                 }
             }
-            Value::Array(items) => {
-                for item in items {
-                    redact(item, settings, store);
-                }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_json_value(item, settings, store);
             }
-            _ => {}
         }
-    }
-    if let EngineError::Source {
-        message, details, ..
-    } = error
-    {
-        for value in settings
-            .values()
-            .chain(store.values())
-            .filter_map(Value::as_str)
-        {
-            *message = message.replace(value, "[REDACTED]");
-        }
-        if let Some(details) = details {
-            redact(details, settings, store);
-        }
+        _ => {}
     }
 }
 
@@ -852,33 +877,38 @@ fn setting_default(kind: &SettingKind) -> Option<Value> {
     }
 }
 
-fn validate_unique_ids<'a>(
-    ids: impl Iterator<Item = &'a str>,
-    kind: &'static str,
-    invalid: &impl Fn(String) -> EngineError,
+/// Rejects empty or repeated ids. Ports: same check over the id list.
+fn validate_unique_ids(
+    kind: &str,
+    ids: &[String],
+    operation: &'static str,
 ) -> Result<(), EngineError> {
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen: Vec<&str> = Vec::new();
     for id in ids {
-        if id.is_empty() || !seen.insert(id) {
-            return Err(invalid(format!("{kind} IDs must be non-empty and unique")));
+        if id.is_empty() || seen.contains(&id.as_str()) {
+            return Err(invalid_response(
+                operation,
+                format!("{kind} IDs must be non-empty and unique"),
+            ));
         }
+        seen.push(id.as_str());
     }
     Ok(())
 }
 
-fn validate_filters(
-    filters: &[Filter],
-    invalid: &impl Fn(String) -> EngineError,
-) -> Result<(), EngineError> {
-    fn visit<'a>(filters: &'a [Filter], ids: &mut Vec<&'a str>) {
-        for filter in filters {
-            ids.push(&filter.id);
-            if let wef_core::FilterKind::Group { children, .. } = &filter.kind {
-                visit(children, ids);
-            }
+fn validate_filters(filters: &[Filter], operation: &'static str) -> Result<(), EngineError> {
+    let mut ids: Vec<String> = Vec::new();
+    collect_filter_ids(filters, &mut ids);
+    validate_unique_ids("filter", &ids, operation)
+}
+
+/// Collects every filter id, descending into groups. Ports: same
+/// depth-first walk before the uniqueness check.
+fn collect_filter_ids(filters: &[Filter], ids: &mut Vec<String>) {
+    for filter in filters {
+        ids.push(filter.id.clone());
+        if let wef_core::FilterKind::Group { children, .. } = &filter.kind {
+            collect_filter_ids(children, ids);
         }
     }
-    let mut ids = Vec::new();
-    visit(filters, &mut ids);
-    validate_unique_ids(ids.into_iter(), "filter", invalid)
 }

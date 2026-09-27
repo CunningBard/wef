@@ -16,7 +16,7 @@ pub struct Package {
 impl Package {
     /// Loads and validates `wef.json` and its declared entry module.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, EngineError> {
-        let root = fs::canonicalize(path.as_ref())?;
+        let root = fs::canonicalize(path.as_ref()).map_err(EngineError::Io)?;
         if !root.is_dir() {
             return Err(EngineError::InvalidPackage {
                 message: format!("package path is not a directory: {}", root.display()),
@@ -24,7 +24,7 @@ impl Package {
         }
 
         let manifest_path = root.join("wef.json");
-        let manifest_source = fs::read_to_string(&manifest_path)?;
+        let manifest_source = fs::read_to_string(&manifest_path).map_err(EngineError::Io)?;
         let manifest: wef_core::Manifest =
             serde_json::from_str(&manifest_source).map_err(|source| {
                 EngineError::ManifestParse {
@@ -32,18 +32,23 @@ impl Package {
                     source,
                 }
             })?;
-        manifest.validate()?;
+        manifest.validate().map_err(EngineError::Manifest)?;
 
         let requested_entry = root.join(&manifest.entry);
-        let entry_path = fs::canonicalize(&requested_entry).map_err(|source| {
-            if source.kind() == std::io::ErrorKind::NotFound {
-                EngineError::InvalidPackage {
-                    message: format!("entry module does not exist: {}", requested_entry.display()),
+        let entry_path = match fs::canonicalize(&requested_entry) {
+            Ok(entry_path) => entry_path,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Err(EngineError::InvalidPackage {
+                        message: format!(
+                            "entry module does not exist: {}",
+                            requested_entry.display()
+                        ),
+                    });
                 }
-            } else {
-                EngineError::Io(source)
+                return Err(EngineError::Io(error));
             }
-        })?;
+        };
 
         if !entry_path.starts_with(&root) {
             return Err(EngineError::InvalidPackage {

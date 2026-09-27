@@ -1,0 +1,1 @@
+{"expected":null,"input":{"url":"https://other.org/manga/m1"},"name":"resolve foreign host to null","operation":"resolveUrl"}

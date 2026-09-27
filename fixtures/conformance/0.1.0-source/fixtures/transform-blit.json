@@ -1,0 +1,1 @@
+{"expected":{"body":"blob:blit-out.png","mimeType":"image/png"},"input":{"body":"blob:blit-in.ppm","headers":{},"mimeType":"image/x-portable-pixmap","page":{"imageUrl":"https://example.org/img/1.png"},"request":{"url":"https://example.org/img/1.png"},"status":200},"name":"transform decode blit encode","operation":"transformImage"}

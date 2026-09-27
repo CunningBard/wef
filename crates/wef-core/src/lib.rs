@@ -65,13 +65,18 @@ impl Manifest {
             });
         }
 
+        let mut needs_newer_wef = false;
+        for capability in &self.requires {
+            if *capability == Capability::Browser || *capability == Capability::Image {
+                needs_newer_wef = true;
+                break;
+            }
+        }
         if self.wef == WEF_VERSION
             && (self.network.is_some()
                 || self.capabilities.settings
                 || self.capabilities.image_transforms
-                || self.requires.iter().any(|capability| {
-                    matches!(capability, Capability::Browser | Capability::Image)
-                }))
+                || needs_newer_wef)
         {
             return Err(ValidationError::InvalidField {
                 field: "wef",
@@ -149,7 +154,13 @@ impl Manifest {
                 reason: format!("invalid URL {base_url:?}: {error}"),
             })?;
 
-            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return Err(ValidationError::InvalidField {
+                    field: "baseUrls",
+                    reason: format!("must be an HTTP(S) origin: {base_url:?}"),
+                });
+            }
+            if parsed.host_str().is_none() {
                 return Err(ValidationError::InvalidField {
                     field: "baseUrls",
                     reason: format!("must be an HTTP(S) origin: {base_url:?}"),
@@ -198,7 +209,13 @@ pub fn validate_absolute_url(field: &'static str, value: &str) -> Result<(), Val
         field,
         reason: format!("invalid URL {value:?}: {error}"),
     })?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(ValidationError::InvalidField {
+            field,
+            reason: format!("must be an absolute HTTP(S) URL: {value:?}"),
+        });
+    }
+    if parsed.host_str().is_none() {
         return Err(ValidationError::InvalidField {
             field,
             reason: format!("must be an absolute HTTP(S) URL: {value:?}"),
@@ -221,13 +238,18 @@ pub fn validate_package_relative_path(value: &str) -> Result<(), String> {
         return Err("must be relative to the package root".into());
     }
 
-    if path.components().any(|component| {
-        matches!(
-            component,
-            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err("must not contain '.', '..', or root components".into());
+    // Ports: same rule as string checks — reject any `.`, `..`, or root
+    // segment; only plain `name`/`dir/name` segments pass.
+    for component in path.components() {
+        match component {
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err("must not contain '.', '..', or root components".into());
+            }
+            Component::Normal(_) => {}
+        }
     }
 
     Ok(())
@@ -275,9 +297,11 @@ pub struct NetworkPolicy {
 
 impl NetworkPolicy {
     fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(rate_limit) = &self.rate_limit
-            && (rate_limit.max_requests == 0 || rate_limit.window_ms == 0)
-        {
+        let rate_limit = match &self.rate_limit {
+            Some(rate_limit) => rate_limit,
+            None => return Ok(()),
+        };
+        if rate_limit.max_requests == 0 || rate_limit.window_ms == 0 {
             return Err(ValidationError::InvalidField {
                 field: "network.rateLimit",
                 reason: "maxRequests and windowMs must be positive".into(),
@@ -585,20 +609,26 @@ impl BrowserTask {
 }
 
 fn validate_capture_spec(spec: &BrowserCaptureSpec) -> Result<(), ValidationError> {
-    if let Some(url_contains) = &spec.url_contains
-        && (url_contains.is_empty()
-            || url_contains.len() > browser_limits::URL_CONTAINS_MAX_LEN
-            || url_contains.contains('\0')
-            || url_contains.chars().any(|c| c.is_control()))
+    if let Some(url_contains) = &spec.url_contains {
+        validate_url_contains(url_contains)?;
+    }
+    validate_json_path("task.capture.jsonPath", &spec.json_path)?;
+    if let Some(field) = &spec.require_item_field {
+        validate_json_segment("task.capture.requireItemField", field)?;
+    }
+    Ok(())
+}
+
+fn validate_url_contains(url_contains: &str) -> Result<(), ValidationError> {
+    if url_contains.is_empty()
+        || url_contains.len() > browser_limits::URL_CONTAINS_MAX_LEN
+        || url_contains.contains('\0')
+        || url_contains.chars().any(|c| c.is_control())
     {
         return Err(ValidationError::InvalidField {
             field: "task.capture.urlContains",
             reason: "must be 1..=256 chars without control characters".into(),
         });
-    }
-    validate_json_path("task.capture.jsonPath", &spec.json_path)?;
-    if let Some(field) = &spec.require_item_field {
-        validate_json_segment("task.capture.requireItemField", field)?;
     }
     Ok(())
 }
@@ -618,12 +648,17 @@ fn validate_selector(field: &'static str, selector: &str) -> Result<(), Validati
 }
 
 fn validate_json_path(field: &'static str, path: &str) -> Result<(), ValidationError> {
+    // An empty path matches the whole body (for top-level arrays, which no
+    // dot walk can address). Ports: empty means identity, not an error.
+    if path.is_empty() {
+        return Ok(());
+    }
     let segments: Vec<&str> = path.split('.').collect();
     if segments.is_empty() || segments.len() > browser_limits::JSON_PATH_MAX_DEPTH {
         return Err(ValidationError::InvalidField {
             field,
             reason: format!(
-                "must have 1..={} dot-separated segments",
+                "must be empty or have 1..={} dot-separated segments",
                 browser_limits::JSON_PATH_MAX_DEPTH
             ),
         });
@@ -650,10 +685,14 @@ fn validate_json_segment(field: &'static str, segment: &str) -> Result<(), Valid
 }
 
 /// Looks up a dot-separated `jsonPath` (e.g. `"result.items"`) in a JSON
-/// value. Returns `None` when any segment is missing or the current value is
-/// not an object. This is the matching primitive every host MUST implement
-/// identically.
+/// value. An empty path returns the whole value, so top-level arrays are
+/// matchable. Returns `None` when any segment is missing or the current
+/// value is not an object. This is the matching primitive every host MUST
+/// implement identically.
 pub fn browser_json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
+    if path.is_empty() {
+        return Some(value);
+    }
     let mut current = value;
     for segment in path.split('.') {
         current = current.get(segment)?;
@@ -664,8 +703,9 @@ pub fn browser_json_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a Jso
 /// Evaluates a [`BrowserCaptureSpec`] against one parsed JSON response body.
 /// Hosts MUST use exactly this predicate, in-page or host-side.
 pub fn browser_capture_matches(spec: &BrowserCaptureSpec, value: &JsonValue) -> bool {
-    let Some(matched) = browser_json_path(value, &spec.json_path) else {
-        return false;
+    let matched = match browser_json_path(value, &spec.json_path) {
+        Some(matched) => matched,
+        None => return false,
     };
     if spec.require_non_empty.unwrap_or(false) {
         match matched {
@@ -676,8 +716,9 @@ pub fn browser_capture_matches(spec: &BrowserCaptureSpec, value: &JsonValue) -> 
         }
     }
     if let Some(field) = &spec.require_item_field {
-        let JsonValue::Array(items) = matched else {
-            return false;
+        let items = match matched {
+            JsonValue::Array(items) => items,
+            _ => return false,
         };
         if !items.iter().any(|item| item.get(field).is_some()) {
             return false;
@@ -1027,5 +1068,20 @@ mod tests {
         assert!(value.validate().is_ok());
         value.wef = "0.2.0".into();
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn empty_json_path_matches_the_whole_body() {
+        let body = serde_json::json!([{"id": "a"}, {"id": "b"}]);
+        assert_eq!(browser_json_path(&body, ""), Some(&body));
+        validate_json_path("task.capture.jsonPath", "").unwrap();
+        let spec = BrowserCaptureSpec {
+            url_contains: None,
+            json_path: String::new(),
+            require_non_empty: None,
+            require_item_field: Some("id".into()),
+            include_unmatched: None,
+        };
+        assert!(browser_capture_matches(&spec, &body));
     }
 }

@@ -45,12 +45,13 @@ Compatibility means that:
 Compatibility does **not** mean that existing Mihon or Aidoku builds can
 install a WEF package without first implementing or embedding a WEF engine.
 
-A 0.1.0 engine MUST accept manifests declaring `"wef": "0.0.1"` through
-`"wef": "0.1.0"` according to each version's rules, and MUST reject an
-unsupported manifest version rather than silently interpreting it as a
-known one. `"wef": "0.1.0"` is semantically identical to `"0.0.4"`: 0.1.0
-finalizes the draft chain into one document and changes nothing on the
-wire.
+A 0.1.0 engine MUST reject an unsupported manifest version rather than
+silently interpreting it as a known one. Backwards compatibility is not
+considered until the design is frozen for reimplementation into a
+reader: until then, no compatibility across versions is promised, and
+drafts may change or remove behavior without migration. `"wef": "0.1.0"`
+is semantically identical to `"0.0.4"`: 0.1.0 finalizes the draft chain
+into one document and changes nothing on the wire.
 
 ---
 
@@ -117,7 +118,7 @@ A WEF source is a directory or archive containing:
 source.wef/
 ├── wef.json
 ├── source.js
-└── icon.png        # optional
+└── res/icon.png    # conventional, optional (section 31.4)
 ```
 
 A package:
@@ -131,8 +132,8 @@ A package:
 Module imports resolve against the package root. Engines MUST reject an
 import that escapes the root, including via symlinks: resolve the
 specifier, canonicalize the result, and require the canonical path to
-remain under the root. Archive encoding and repository distribution are
-not standardized in 0.1.0.
+remain under the root. Archive encoding is not standardized in 0.1.0;
+repository layout is section 31.
 
 ---
 
@@ -145,7 +146,7 @@ The manifest is a UTF-8 JSON file named `wef.json`.
 ```json
 {
   "wef": "0.1.0",
-  "id": "multi.wef.magadex",
+  "id": "multi.wef.mangadex",
   "name": "MangaDex",
   "version": "0.1.0",
   "entry": "source.js",
@@ -189,7 +190,9 @@ It:
 
 - MUST be non-empty;
 - MUST contain only ASCII letters, digits, `.`, `-`, and `_`;
-- SHOULD use lowercase reverse-domain notation;
+- SHOULD use lowercase reverse-domain notation, unless the source is
+  distributed through an extension repository, in which case section
+  31.1 applies instead;
 - MUST remain stable across ordinary source updates.
 
 #### `name`
@@ -214,10 +217,22 @@ logical source instance for each declared language.
 
 #### `baseUrls`
 
-Known website and API origins associated with the source. Engines MUST
-use these origins for browser-visit policy: a browser run MUST target an
-HTTP(S) URL on a listed origin, and session-authenticated follow-up
-requests MUST also target listed origins (see section 19).
+The allowlist of URL prefixes the source may contact. Every plain HTTP,
+image, browser-visit, and session-authenticated request URL — each
+redirect hop included — MUST fall under a listed entry, and engines MUST
+fail requests that do not instead of sending them.
+
+An entry matches a request URL when scheme, host, and port are equal and
+the entry path is a prefix of the request path on a segment boundary; a
+bare origin entry allows every path on that origin. (So
+`https://api.example.org/v5` allows `/v5/manga` but neither
+`/v6/manga` nor `https://api.example.org.evil.com/`.) A host starting
+with `*.` covers one dynamic label (`https://*.example.org` allows
+`a.example.org` but neither `example.org` itself nor `a.b.example.org`),
+so image CDNs with server-assigned hosts stay listable. Entries MUST be
+absolute HTTP(S) URLs. Sources MUST list every website, API, image CDN,
+and redirect target they use, since unlisted targets fail on every
+conforming engine.
 
 #### `requires`
 
@@ -255,6 +270,10 @@ the reader's corresponding browse operations.
 
 When a source has only one meaningful browse feed, it SHOULD declare it
 as `popular`.
+
+Sources MAY declare additional listings for feeds beyond these two.
+Mihon/Tachiyomi-style adapters map only `popular` and `latest`; richer
+readers MAY expose the rest.
 
 ### 7.4 Capabilities
 
@@ -381,7 +400,7 @@ Rules:
 - `listingId` MUST match a manifest listing;
 - `page` begins at `1`;
 - `filters`, when present, carry the same leaf-value encoding as
-  `SearchInput.filters` (section 12); absent means unfiltered;
+  `SearchInput.filters` (section 11.1); absent means unfiltered;
 - results MUST use source-defined order.
 
 ### 10.2 `search`
@@ -486,7 +505,7 @@ interface FilterGroup {
   children: Filter[];
   presentation?: "section" | "inline";
 }
-interface FilterText { type: "text"; id: string; name: string; default?: string; placeholder?: string; }
+interface FilterText { type: "text"; id: string; name: string; placeholder?: string; }
 interface FilterToggle { type: "toggle"; id: string; name: string; default?: boolean; }
 interface FilterSelect { type: "select"; id: string; name: string; options: FilterOption[]; default?: string; }
 interface FilterMultiSelect { type: "multi-select"; id: string; name: string; options: FilterOption[]; default?: string[]; }
@@ -498,14 +517,38 @@ interface FilterOption { id: string; name: string; }
 
 Rules:
 
-- every leaf filter has a stable `id`, `name`, and optional default;
-- setting and leaf-filter IDs MUST be unique, including nested groups;
+- every leaf filter has a stable `id` and `name`; every kind except
+  `text` accepts an optional `default`;
+- setting IDs MUST be unique within `getSettings` output, and leaf-filter
+  IDs MUST be unique within `getFilters` output, including nested groups
+  (settings and filters are separate namespaces);
 - range and sort defaults MUST be valid;
 - groups are semantic organization and namespace containers, not values
   passed to `SearchInput.filters`; the host MUST flatten selected leaf
   values into the `filters` record. A host that cannot present a control
   MAY obtain the value through another interface or omit it, but MUST
   NOT invent a different value encoding.
+
+### 11.1.1 Filter value encoding
+
+Each leaf kind encodes its selected value under its `id` exactly as
+follows. Readers MUST produce these shapes; sources MUST accept them:
+
+| kind | `filters` value |
+|---|---|
+| `text` | string; absent or `""` means no constraint |
+| `toggle` | boolean |
+| `select` | option `id` string |
+| `multi-select` | array of option `id` strings; empty means none selected |
+| `tri-state` | object mapping option `id` to `"include"` or `"exclude"`; absent keys and `"neutral"` both mean neutral |
+| `range` | `{ min?: number, max?: number }`; an absent bound means unbounded |
+| `sort` | `{ value: string, direction: "asc" \| "desc" }`, where `value` is an option `id` |
+
+Groups contribute no value. Hosts SHOULD populate every declared leaf's
+default into the record before invoking search or listing (the same
+merge as settings, section 23); a host that cannot present a control MAY
+omit its key. Sources MUST handle absent keys and MUST ignore unknown
+filter IDs.
 
 ### 11.2 `getSettings`
 
@@ -597,6 +640,13 @@ migrateChapterKey(ctx, input: ChapterKeyMigrationInput) -> string
 
 Keys SHOULD remain stable. Migration exists for unavoidable source URL or
 identifier changes.
+
+Lifecycle (non-normative): readers store opaque keys durably. When a
+source update changes its key scheme, old keys stop resolving — updates
+return `NOT_FOUND` or come back empty. A reader SHOULD then call the
+migration operations for each stored key, persist the results, and retry
+before treating the entry as dead. Sources SHOULD keep migrations total:
+every previously issued key maps to its replacement.
 
 ---
 
@@ -701,10 +751,13 @@ Rules:
 - `url`, when present, SHOULD be absolute;
 - `nextUpdateAt`, when present, MUST be ISO 8601;
 - missing metadata SHOULD be omitted rather than invented;
+- tags are flat display strings; a source MAY namespace one as
+  `namespace:name` (split on the first colon) — readers that understand
+  namespaces SHOULD split, others MUST treat the whole string as opaque;
 - `extra` MAY preserve source-specific state required by later
   operations;
 - readers MUST round-trip `extra` unchanged;
-- sources SHOULD keep `extra` small and JSON-compatible.
+- sources MUST keep each record's serialized `extra` within 65536 bytes.
 
 ---
 
@@ -743,9 +796,11 @@ Rules:
 - numeric companion fields SHOULD be included when safely parseable;
 - `language` SHOULD use BCP 47;
 - `publishedAt` MUST be ISO 8601;
-- chapter array order is source-defined;
+- chapter array order is source-defined; sources SHOULD use ascending
+  chapter-number order unless the site defines another order;
 - readers MAY reorder chapters;
-- readers MUST round-trip `extra` unchanged.
+- readers MUST round-trip `extra` unchanged;
+- sources MUST keep each record's serialized `extra` within 65536 bytes.
 
 The dual string/numeric number fields avoid losing values such as
 `10.5`, `Extra`, or source-specific numbering while still mapping
@@ -842,6 +897,15 @@ Rules:
 - `method` defaults to `GET`;
 - query values are encoded by the engine: strings append as-is, arrays
   repeat the key, anything else fails the request;
+- every request URL and every redirect hop MUST fall under `baseUrls`
+  (section 7.2); a hop leaving the allowlist fails the whole request
+  instead of sending;
+- redirects preserve the method except 303 (which switches to GET) and
+  301/302 after POST (likewise); only 301, 302, 303, 307, and 308 are
+  followed, others are returned as-is; engines MUST cap the hop count
+  (reference: 10) and MUST NOT forward `Authorization`,
+  `Proxy-Authorization`, or `Cookie` headers across origins, even
+  between two listed ones;
 - `url` in the response is the final URL after redirects;
 - response headers SHOULD use lowercase names;
 - `body` is decoded text;
@@ -855,7 +919,6 @@ The engine defines:
 
 - HTTP library;
 - cookie persistence;
-- redirects;
 - caching;
 - proxy support;
 - TLS behavior;
@@ -906,7 +969,6 @@ interface BrowserCaptureTask {
   kind: "capture";
   capture: BrowserCaptureSpec;
   snapshot?: BrowserSnapshotSpec; // DOM fallback when nothing is captured
-  includeUnmatched?: boolean; // default false; see section 20
 }
 
 interface BrowserCaptureSpec {
@@ -914,6 +976,7 @@ interface BrowserCaptureSpec {
   jsonPath: string; // dot path, e.g. "result.items"
   requireNonEmpty?: boolean; // matched value must not be empty
   requireItemField?: string; // matched array must contain an item with this field
+  includeUnmatched?: boolean; // default false; envelope in section 20
 }
 
 interface BrowserSnapshotSpec {
@@ -926,9 +989,10 @@ interface BrowserSnapshotSpec {
 Hosts MUST evaluate `BrowserCaptureSpec` against each observed parsed-JSON
 response body with exactly this logic:
 
-1. Walk `jsonPath` segment by segment through objects. If any segment is
-   missing (or the current value is not an object), the body does not
-   match.
+1. An empty `jsonPath` matches the whole body (this is how top-level
+   arrays are captured). Otherwise walk `jsonPath` segment by segment
+   through objects. If any segment is missing (or the current value is
+   not an object), the body does not match.
 2. If `requireNonEmpty` is true, reject `null`, empty arrays, and empty
    objects.
 3. If `requireItemField` is set, the matched value MUST be a non-empty
@@ -945,9 +1009,11 @@ page models stays in source JavaScript, inside the engine sandbox.
 - `snapshot`: `payload` is the parsed JSON text of `selector`, or `null`
   when the element is absent or unparseable.
 - `capture`: `payload` is the first matching body (in observation order,
-  deduplicated by exact JSON equality), else the `snapshot` fallback JSON
-  when present, else `null`. With `includeUnmatched`, the envelope of
-  section 20 applies instead.
+  deduplicated by JSON value equality — objects compare
+  order-insensitively). The predicate only filters: the payload is always
+  the whole body, never the `jsonPath`-extracted value. Else the
+  `snapshot` fallback JSON when present, else `null`. With
+  `includeUnmatched`, the envelope of section 20 applies instead.
 
 ### 19.3 Reference algorithm
 
@@ -957,18 +1023,22 @@ JSON shapes are the compatibility contract; browser-driving techniques
 implementation choices:
 
 1. Validate: require explicit user-visible consent for the source/version
-   and destination origin; check `url` is HTTP(S) on a `baseUrls` origin;
-   require `timeoutMs` within the host maximum; validate the task per
-   section 23.
+   and destination origin (for example a per-source install grant, a
+   per-run prompt, or repository policy recorded at install time); check
+   `url` is HTTP(S) under a `baseUrls` entry; require `timeoutMs`, when
+   present, within the host maximum, and otherwise apply the host
+   default (reference: equal to the maximum, 30000); validate the task
+   per section 23.
 2. Open an ephemeral tab with a fresh profile (no user data, isolated per
    source identity and configuration profile). If `html` is set, load it
    with `url` as the base URL and skip network navigation.
 3. `snapshot`: extract and return per section 19.2.
 4. `capture`: observe network response bodies and parsed page values,
-   keeping those matching section 19.1; dedupe exact-equal values.
-5. Wait until the first match or `timeoutMs`, then return it; else try
-   the `snapshot` fallback; else return `null`. Multi-page lists are the
-   source's job: it signs plain requests and walks result pagination
+   keeping those matching section 19.1; dedupe value-equal matches.
+5. Wait until the first match or the timeout (`timeoutMs`, else the host
+   default), then return it; else try the `snapshot` fallback; else
+   return `null`. Multi-page lists are the source's job: it issues plain
+   `http` requests and follows result pagination (offsets, cursors)
    natively instead of driving page clicks.
 6. Enforce the payload byte cap, close the tab even on error, and mint an
    opaque `session` usable only as `HttpRequest.browserSession` by the
@@ -988,8 +1058,9 @@ storage to source code.
   `HttpRequest.browserSession` by the source that received it; tokens
   MUST be unpredictable across sources sharing one host.
 - The collected cookie set spans the browser profile, so a
-  session-authenticated request MUST target a policy (`baseUrls`) origin:
-  the jar must never ride along to an arbitrary URL.
+  session-authenticated request MUST target a `baseUrls` entry: the jar
+  must never ride along to an arbitrary URL, including via a redirect
+  hop (section 18 fails such hops instead of sending them).
 - `html`, when supplied, is loaded with `url` as its base URL. This
   permits safe inspection of already-fetched markup without an
   uncontrolled navigation.
@@ -1016,7 +1087,7 @@ interface UnmatchedEnvelope {
 
 - `unmatched` holds network response bodies (parsed as JSON) and observed
   parsed/binary-decoded values that did not match, in observation order,
-  deduplicated by exact JSON equality, capped like any other payload.
+  deduplicated by JSON value equality and capped like any other payload.
 - Sources MUST handle the envelope explicitly (`"unmatched" in payload`).
   Hosts MUST NOT interpret unmatched values — recognition, decoding, and
   mapping stay in source JavaScript inside the engine sandbox.
@@ -1052,9 +1123,16 @@ Rules:
 - `set` returns `true` on success; `set(key, null)` deletes the key.
   Hosts MAY persist to disk or keep memory only; sources MUST handle cold
   starts on every operation.
-- The reference pattern for rotation: on upstream rejection, the source
-  clears the entry and re-bootstraps, then retries once — the same state
-  machine as dropping a stale cookie.
+Session bootstrap recipe (non-normative): protected sites often need a
+browser-established session before plain HTTP works. The portable
+pattern is: on first use, `browser.run` a snapshot or capture task
+against the challenge page and persist the returned `session` plus any
+derived tokens in `ctx.store`; attach them as `browserSession`
+(cookies) or headers on later `http` calls; when upstream rejects them
+(401/403/`CHALLENGE_REQUIRED`), clear the store entry, re-bootstrap,
+and retry once before failing. Hosts never interpret the stored
+material — rotation logic stays in source JavaScript inside the engine
+sandbox.
 
 ---
 
@@ -1063,10 +1141,22 @@ Rules:
 ```ts
 interface UrlApi {
   resolve(base: string, value: string): string;
+  parse(url: string): UrlParts;
+}
+
+interface UrlParts {
+  scheme: string;
+  host: string | null;
+  port: number | null; // explicit port only
+  path: string;
+  query: string | null; // raw query without `?`
 }
 ```
 
 `resolve` converts relative and protocol-relative URLs into absolute URLs.
+`parse` splits an absolute URL for source-side routing (typically
+`resolveUrl` implementations); it fails the operation on unparseable
+input.
 
 ---
 
@@ -1143,6 +1233,9 @@ Rules:
 - setting IDs MUST be unique and stable;
 - hosts MUST merge absent values with defaults before exposing
   `ctx.settings`;
+- setting values use the filter leaf encoding of section 11.1.1: `text`
+  a string, `toggle` a boolean, `select` an option `id`, `multi-select`
+  an array of option `ids`;
 - a `secret` setting MUST be redacted from diagnostics, fixtures, logs,
   and exported source state;
 - settings affect only later source invocations; `getSettings` MUST NOT
@@ -1190,9 +1283,10 @@ interface Rect { x: number; y: number; width: number; height: number; }
 
 `ImageBitmap` is an opaque host object. It MUST only be accepted by
 `ctx.image` methods and MUST NOT cross normal JSON operation boundaries.
-Engines MUST set maximum input bytes, decoded pixels, output bytes, and
-transform duration. They MUST fail with `UNSUPPORTED` when the requested
-codec is unavailable.
+`blit` copies without scaling: the two rectangles MUST have equal
+dimensions. Engines MUST set maximum input bytes, decoded pixels, output
+bytes, and transform duration. They MUST fail with `UNSUPPORTED` when the
+requested codec is unavailable.
 
 ---
 
@@ -1219,9 +1313,21 @@ ctx.fail("NOT_FOUND", "Manga was not found");
 
 Unexpected source exceptions MUST become `SOURCE_ERROR`.
 
-`CHALLENGE_REQUIRED` tells the engine that normal HTTP access was
-insufficient. `UNSUPPORTED` covers denied capabilities, codecs, policy,
-and scripted-capture refusal.
+When a source raises its own error, it SHOULD pick the closest code:
+
+- `NOT_FOUND`: the requested manga, chapter, or page does not exist.
+- `HTTP_ERROR`: an upstream request failed and the source cannot continue.
+- `INVALID_RESPONSE`: upstream returned something unparseable.
+- `AUTH_REQUIRED`: the site needs a login the engine cannot provide —
+  the message SHOULD tell the reader what to do.
+- `RATE_LIMITED`: upstream or host throttling; readers SHOULD back off
+  and MAY retry.
+- `CHALLENGE_REQUIRED`: normal HTTP access was insufficient (see below).
+- `UNSUPPORTED`: a capability, codec, policy, or scripted capture the
+  host refused.
+
+`CHALLENGE_REQUIRED` pairs with browser recovery: a source that cannot
+continue SHOULD report it with a useful fallback message (section 19.4).
 
 ---
 
@@ -1231,6 +1337,8 @@ Task and manifest validation is part of the contract; every host MUST
 enforce the same bounds:
 
 - `id`: non-empty ASCII letters, digits, `.`, `-`, `_`.
+- `baseUrls`: every entry MUST be an absolute HTTP(S) URL (paths
+  allowed; only scheme/host/port/path-prefix carry policy meaning).
 - `entry`: package-relative, resolving inside the package root after
   canonicalization.
 - at least one listing; `listingId` inputs MUST match a manifest listing.
@@ -1238,13 +1346,16 @@ enforce the same bounds:
   their context APIs (`ctx.browser` etc. MUST be absent without them).
 - capability/export consistency (`settings` requires `getSettings`,
   `imageTransforms` requires `transformImage` plus `"image"`, and so on).
-- unique setting and leaf-filter IDs, including nested groups; valid
-  range and sort defaults; a valid positive rate-limit policy.
+- unique setting IDs and unique leaf-filter IDs, each including nested
+  groups; a valid positive rate-limit policy. (Range and sort defaults
+  MUST be valid per section 11.1; that is a source-side obligation,
+  not a host-enforced bound.)
 - `selector` fields: 1..=256 chars, no NUL or ASCII control characters
   (other than space).
 - `capture.urlContains`: 1..=256 chars, no NUL or control characters.
-- `capture.jsonPath`: 1..=8 dot-separated segments, each 1..=64 chars of
-  `[A-Za-z0-9_$]`. `requireItemField` follows the single-segment rule.
+- `capture.jsonPath`: empty (the whole body) or 1..=8 dot-separated
+  segments, each 1..=64 chars of `[A-Za-z0-9_$]`. `requireItemField`
+  follows the single-segment rule.
 - `capture.includeUnmatched` is a boolean when present.
 - unknown `BrowserCaptureTask` fields (including the retired `paginate`)
   MUST be rejected, not ignored.
@@ -1320,6 +1431,22 @@ An adapter MAY omit unsupported optional fields.
 An adapter MUST preserve opaque keys and `extra` data as far as the
 reader's storage model allows.
 
+Filter control mapping (non-normative):
+
+| WEF filter kind | Mihon/Tachiyomi-style mapping | Aidoku mapping |
+|---|---|---|
+| `group` | `Filter.Group` of the children | nested filter stack |
+| `text` | `Filter.Text` | text input |
+| `toggle` | `Filter.CheckBox` | boolean toggle |
+| `select` | `Filter.Select` | single-select |
+| `multi-select` | a `Filter.Group` of check boxes, or the reader's multi-choice control | multi-select |
+| `tri-state` | `Filter.TriState` | include/exclude control |
+| `range` | no direct equivalent; nearest numeric control, or omit | numeric bounds, or omit |
+| `sort` | `Filter.Sort` | sort control |
+
+Values cross the boundary in the section 11.1.1 encoding regardless of
+which native control produced them.
+
 ---
 
 ## 29. Reader responsibilities
@@ -1364,6 +1491,16 @@ A repository MAY:
 - remove unmaintained sources.
 
 An engine MAY impose additional restrictions.
+
+Sandbox checklist (non-normative): a reader embedding an engine SHOULD
+run source JavaScript with no direct network, filesystem, or timer
+primitives — every capability through `ctx`; bound loop iterations and
+wall-clock time per operation; enforce the byte, pixel, and timeout caps
+of sections 26–27 even where the host could go further; redact secret
+settings, session tokens, and store contents from logs, diagnostics, and
+exported state; scope cookies, sessions, settings, and storage by source
+identity and configuration profile; and treat all source output as
+untrusted markup.
 
 ---
 
@@ -1473,7 +1610,6 @@ The following are intentionally deferred:
 - dynamic listings;
 - dynamic base URLs;
 - package signatures;
-- repository indexes;
 - source dependencies;
 - WebAssembly representation;
 - declarative selector-only representation;
@@ -1481,7 +1617,50 @@ The following are intentionally deferred:
 
 ---
 
-## 33. License
+## 33. Conformance vectors
+
+The fixture format below is the portable conformance suite: any engine
+passes by reproducing the `expected` outputs for the same inputs. It is
+deliberately harness-free — no engine, language, or runner is assumed.
+
+```ts
+interface FixtureVector {
+  name: string;       // human-readable case name
+  operation: string;  // camelCase export: getMangaList, search,
+                      // getMangaUpdate, getPages, getFilters, getSettings,
+                      // resolveUrl, getImageRequest, transformImage,
+                      // migrateMangaKey, migrateChapterKey
+  input: JsonValue;   // the operation input (null when it takes none)
+  http?: HttpStep[];  // scripted request/response pairs, in order
+  expected: JsonValue; // exact expected output (or blob reference below)
+}
+
+interface HttpStep {
+  request: HttpRequest;   // section 18 shape; must match exactly
+  response: HttpResponse; // section 18 shape, body as text
+}
+```
+
+Rules for harnesses:
+
+- replies are deterministic and literal: the mock answers each `http`
+  request with its paired response without interpretation;
+- a request with no remaining paired step fails the case, and
+  unconsumed steps fail it too;
+- transform cases reference binary files instead of inline bytes:
+  `"body": "blob:filename"` in `input` and `expected` resolves to a
+  sibling file, compared byte-for-byte;
+- browser and cross-operation storage have no vectors by design (mock
+  hosts answer payloads literally and start fresh per case); they are
+  covered by host-level tests, not by vectors.
+
+The reference vector set is `fixtures/conformance/0.1.0-source`: one
+package exercising the full 0.1.0 wire, runnable with the reference
+`wef test` command and readable as plain JSON by any port.
+
+---
+
+## 34. License
 
 The WEF 0.1.0 specification is dual-licensed under MIT or Apache-2.0, at
 the implementer's option. See `LICENSE-MIT` and `LICENSE-APACHE`.

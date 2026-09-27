@@ -1,0 +1,1 @@
+{"expected":"v2:abc","input":{"key":"legacy:abc"},"name":"migrate manga key","operation":"migrateMangaKey"}

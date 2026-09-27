@@ -18,8 +18,8 @@
 //!    (see `wef-core`). Dedupe exact-equal values.
 //! 5. Wait until the first match or `timeoutMs`, then return it; else try
 //!    the `snapshot` fallback; else return `null`. Multi-page lists are the
-//!    source's job: it signs plain requests and walks `meta` pagination
-//!    natively (WEF 0.0.4 store flow) instead of auto-clicking.
+//!    source's job: it issues plain `http` requests and follows result
+//!    pagination (offsets, cursors) natively instead of auto-clicking.
 //! 6. Enforce `maxPayloadBytes` on the returned payload, close the tab even
 //!    on error, and mint an opaque `session` scoped to the source/profile.
 //!
@@ -63,7 +63,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use url::Url;
 
 pub use wef_core::{
     BrowserCaptureSpec, BrowserCaptureTask, BrowserSnapshotSpec, BrowserSnapshotTask, BrowserTask,
@@ -72,6 +71,12 @@ pub use wef_core::{
 use crate::{HostError, HttpRequest, HttpResponse, WefHost};
 
 static NEXT_SCOPE: AtomicU64 = AtomicU64::new(0);
+
+/// Mints one process-wide session scope so two mock hosts never issue the
+/// same session token. Ports: any unique-per-host value (counter, UUID).
+fn next_scope_nonce() -> u64 {
+    NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Maximum source-visible browser payload (5 MiB of JSON).
 pub const MAX_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
@@ -119,9 +124,13 @@ pub struct BrowserPolicy {
 }
 
 impl BrowserPolicy {
-    pub fn for_origins(origins: impl IntoIterator<Item = String>) -> Self {
+    pub fn for_origins(origins: Vec<String>) -> Self {
+        let mut allowed_origins = BTreeSet::new();
+        for origin in origins {
+            allowed_origins.insert(origin);
+        }
         Self {
-            allowed_origins: origins.into_iter().collect(),
+            allowed_origins,
             consent_granted: false,
             max_timeout_ms: 30_000,
             max_payload_bytes: MAX_PAYLOAD_BYTES,
@@ -129,17 +138,11 @@ impl BrowserPolicy {
     }
 
     pub(crate) fn allow_url(&self, value: &str) -> Result<(), HostError> {
-        let url = Url::parse(value)
-            .map_err(|error| HostError::Message(format!("invalid browser URL: {error}")))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(HostError::Message("browser URL must use HTTP(S)".into()));
+        let mut allowed: Vec<String> = Vec::new();
+        for origin in self.allowed_origins.iter() {
+            allowed.push(origin.clone());
         }
-        let origin = url.origin().ascii_serialization();
-        if !self.allowed_origins.contains(&origin) {
-            return Err(HostError::Message(format!(
-                "browser origin is not allowed: {origin}"
-            )));
-        }
+        crate::host::check_allowed_url(&allowed, value)?;
         Ok(())
     }
 
@@ -150,14 +153,20 @@ impl BrowserPolicy {
             ));
         }
         self.allow_url(&request.url)?;
-        if request.timeout_ms.unwrap_or(self.max_timeout_ms) > self.max_timeout_ms {
+        let timeout_ms = match request.timeout_ms {
+            Some(timeout_ms) => timeout_ms,
+            None => self.max_timeout_ms,
+        };
+        if timeout_ms > self.max_timeout_ms {
             return Err(HostError::Message(
                 "browser timeout exceeds host policy".into(),
             ));
         }
-        if let Some(html) = &request.html
-            && html.len() > self.max_payload_bytes
-        {
+        let html_len = match &request.html {
+            Some(html) => html.len(),
+            None => 0,
+        };
+        if html_len > self.max_payload_bytes {
             return Err(HostError::Message(
                 "browser html exceeds host byte limit".into(),
             ));
@@ -170,15 +179,15 @@ impl BrowserPolicy {
     }
 
     pub(crate) fn check_payload(&self, payload: &Option<Value>) -> Result<(), HostError> {
-        if let Some(payload) = payload
-            && serde_json::to_string(payload)
+        if let Some(payload) = payload {
+            let size = serde_json::to_string(payload)
                 .map(|text| text.len())
-                .unwrap_or(usize::MAX)
-                > self.max_payload_bytes
-        {
-            return Err(HostError::Message(
-                "browser payload exceeds host byte limit".into(),
-            ));
+                .unwrap_or(usize::MAX);
+            if size > self.max_payload_bytes {
+                return Err(HostError::Message(
+                    "browser payload exceeds host byte limit".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -192,14 +201,17 @@ pub trait InteractiveBrowserSurface {
     fn request_with_session(&mut self, request: HttpRequest) -> Result<HttpResponse, HostError>;
 }
 
-pub struct InteractiveBrowserHost<S> {
+/// Reference host wiring policy to a platform surface: the surface performs
+/// the six algorithm steps, the policy validates and mints sessions.
+/// Ports: a class holding the platform surface behind an interface.
+pub struct InteractiveBrowserHost {
     policy: BrowserPolicy,
-    surface: S,
+    surface: Box<dyn InteractiveBrowserSurface>,
     sessions: BTreeSet<String>,
 }
 
-impl<S> InteractiveBrowserHost<S> {
-    pub fn new(policy: BrowserPolicy, surface: S) -> Self {
+impl InteractiveBrowserHost {
+    pub fn new(policy: BrowserPolicy, surface: Box<dyn InteractiveBrowserSurface>) -> Self {
         Self {
             policy,
             surface,
@@ -208,13 +220,13 @@ impl<S> InteractiveBrowserHost<S> {
     }
 }
 
-impl<S: InteractiveBrowserSurface> WefHost for InteractiveBrowserHost<S> {
+impl WefHost for InteractiveBrowserHost {
     fn request(&mut self, request: HttpRequest) -> Result<HttpResponse, HostError> {
-        if !request
-            .browser_session
-            .as_ref()
-            .is_some_and(|session| self.sessions.contains(session))
-        {
+        let known = match request.browser_session.as_ref() {
+            Some(session) => self.sessions.contains(session),
+            None => false,
+        };
+        if !known {
             return Err(HostError::Unsupported);
         }
         self.policy.allow_url(&request.url)?;
@@ -253,13 +265,13 @@ pub struct MockBrowserHost {
 }
 
 impl MockBrowserHost {
-    pub fn new(policy: BrowserPolicy, replies: impl IntoIterator<Item = MockBrowserReply>) -> Self {
+    pub fn new(policy: BrowserPolicy, replies: Vec<MockBrowserReply>) -> Self {
         Self {
             policy,
-            replies: replies.into_iter().collect(),
+            replies: replies.into(),
             sessions: BTreeSet::new(),
             next_session: 0,
-            scope_nonce: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
+            scope_nonce: next_scope_nonce(),
             session_responses: BTreeMap::new(),
         }
     }
@@ -270,32 +282,39 @@ impl MockBrowserHost {
 
     /// Configures the response returned when an authenticated opaque session is
     /// handed back to `ctx.http.request`.
-    pub fn set_session_response(&mut self, url: impl Into<String>, response: HttpResponse) {
-        self.session_responses.insert(url.into(), response);
+    pub fn set_session_response(&mut self, url: &str, response: HttpResponse) {
+        self.session_responses.insert(url.to_owned(), response);
     }
 }
 
 impl WefHost for MockBrowserHost {
     fn request(&mut self, request: HttpRequest) -> Result<HttpResponse, HostError> {
-        let session = request.browser_session.ok_or(HostError::Unsupported)?;
+        let session = match request.browser_session {
+            Some(session) => session,
+            None => return Err(HostError::Unsupported),
+        };
         if !self.sessions.contains(&session) {
             return Err(HostError::Unsupported);
         }
         self.policy.allow_url(&request.url)?;
-        self.session_responses
-            .get(&request.url)
-            .cloned()
-            .ok_or_else(|| {
-                HostError::Message("no mock HTTP response for browser session request".into())
-            })
+        match self.session_responses.get(&request.url).cloned() {
+            Some(response) => Ok(response),
+            None => Err(HostError::Message(
+                "no mock HTTP response for browser session request".into(),
+            )),
+        }
     }
 
     fn run_browser(&mut self, request: BrowserRunRequest) -> Result<BrowserRunResult, HostError> {
         self.policy.validate(&request)?;
-        let reply = self
-            .replies
-            .pop_front()
-            .ok_or_else(|| HostError::Message("no mock browser reply configured".into()))?;
+        let reply = match self.replies.pop_front() {
+            Some(reply) => reply,
+            None => {
+                return Err(HostError::Message(
+                    "no mock browser reply configured".into(),
+                ));
+            }
+        };
         self.policy.allow_url(&reply.url)?;
         self.policy.check_payload(&reply.payload)?;
         let session = format!("browser-session-{}-{}", self.scope_nonce, self.next_session);

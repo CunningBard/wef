@@ -1,0 +1,1 @@
+{"expected":{"body":"blob:xor-out.bin","mimeType":"application/x-xor"},"input":{"body":"blob:xor-in.bin","headers":{},"mimeType":"application/x-xor","page":{"imageUrl":"https://example.org/img/1.png"},"request":{"url":"https://example.org/img/1.png"},"status":200},"name":"transform byte-wise XOR","operation":"transformImage"}

@@ -1,0 +1,1 @@
+{"expected":{"listingId":"latest","type":"listing"},"input":{"url":"https://example.org/latest"},"name":"resolve listing URL","operation":"resolveUrl"}

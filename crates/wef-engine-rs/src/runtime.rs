@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{
@@ -17,14 +17,14 @@ use wef_core::{Capability, Manifest};
 
 use crate::{
     error::EngineError,
-    host::{HostHandle, HttpRequest, StoreHandle, WefHost},
+    host::{HostHandle, HttpRequest, SharedStore},
 };
 
 pub(crate) fn context_value(
     manifest: &Manifest,
     host: Option<&HostHandle>,
     settings: &serde_json::Map<String, serde_json::Value>,
-    store: Option<&StoreHandle>,
+    store: Option<&SharedStore>,
     context: &mut Context,
 ) -> Result<JsValue, EngineError> {
     let url = ObjectInitializer::new(context)
@@ -33,37 +33,32 @@ pub(crate) fn context_value(
             JsString::from("resolve"),
             2,
         )
+        .function(
+            NativeFunction::from_fn_ptr(parse_url),
+            JsString::from("parse"),
+            1,
+        )
         .build();
 
-    let http = if manifest
-        .requires
-        .iter()
-        .any(|capability| matches!(capability, Capability::Http))
-    {
-        let host = host.ok_or(EngineError::MissingHostCapability { capability: "http" })?;
+    let http = if manifest.requires.contains(&Capability::Http) {
+        let host = match host {
+            Some(host) => host,
+            None => return Err(EngineError::MissingHostCapability { capability: "http" }),
+        };
         Some(
-            ObjectInitializer::with_native_data(
-                HostState {
-                    host: Rc::clone(host),
-                },
-                context,
-            )
-            .function(
-                NativeFunction::from_fn_ptr(http_request),
-                JsString::from("request"),
-                1,
-            )
-            .build(),
+            ObjectInitializer::with_native_data(HostState { host: host.clone() }, context)
+                .function(
+                    NativeFunction::from_fn_ptr(http_request),
+                    JsString::from("request"),
+                    1,
+                )
+                .build(),
         )
     } else {
         None
     };
 
-    let html = if manifest
-        .requires
-        .iter()
-        .any(|capability| matches!(capability, Capability::Html))
-    {
+    let html = if manifest.requires.contains(&Capability::Html) {
         Some(
             ObjectInitializer::new(context)
                 .function(
@@ -76,48 +71,48 @@ pub(crate) fn context_value(
     } else {
         None
     };
-    let browser = if manifest
-        .requires
-        .iter()
-        .any(|capability| matches!(capability, Capability::Browser))
-    {
-        let host = host.ok_or(EngineError::MissingHostCapability {
-            capability: "browser",
-        })?;
+    let browser = if manifest.requires.contains(&Capability::Browser) {
+        let host = match host {
+            Some(host) => host,
+            None => {
+                return Err(EngineError::MissingHostCapability {
+                    capability: "browser",
+                });
+            }
+        };
         Some(
-            ObjectInitializer::with_native_data(
-                HostState {
-                    host: Rc::clone(host),
-                },
-                context,
-            )
-            .function(
-                NativeFunction::from_fn_ptr(browser_run),
-                JsString::from("run"),
-                1,
-            )
-            .build(),
+            ObjectInitializer::with_native_data(HostState { host: host.clone() }, context)
+                .function(
+                    NativeFunction::from_fn_ptr(browser_run),
+                    JsString::from("run"),
+                    1,
+                )
+                .build(),
         )
     } else {
         None
     };
-    let image = manifest
-        .requires
-        .iter()
-        .any(|capability| matches!(capability, Capability::Image))
-        .then(|| crate::image::context_value(crate::image::ImageLimits::default(), context));
-    let store = if manifest
-        .requires
-        .iter()
-        .any(|capability| matches!(capability, Capability::Storage))
-    {
-        let store = store.ok_or(EngineError::MissingHostCapability {
-            capability: "storage",
-        })?;
+    let image = if manifest.requires.contains(&Capability::Image) {
+        Some(crate::image::context_value(
+            crate::image::ImageLimits::default(),
+            context,
+        ))
+    } else {
+        None
+    };
+    let store = if manifest.requires.contains(&Capability::Storage) {
+        let store = match store {
+            Some(store) => store,
+            None => {
+                return Err(EngineError::MissingHostCapability {
+                    capability: "storage",
+                });
+            }
+        };
         Some(
             ObjectInitializer::with_native_data(
                 StoreState {
-                    store: Rc::clone(store),
+                    store: store.clone(),
                 },
                 context,
             )
@@ -166,13 +161,13 @@ pub(crate) fn context_value(
 #[derive(Clone, Trace, Finalize, JsData)]
 struct StoreState {
     #[unsafe_ignore_trace]
-    store: StoreHandle,
+    store: SharedStore,
 }
 
 #[derive(Clone, Trace, Finalize, JsData)]
 struct HostState {
     #[unsafe_ignore_trace]
-    host: Rc<RefCell<dyn WefHost>>,
+    host: HostHandle,
 }
 
 #[derive(Clone, Trace, Finalize, JsData)]
@@ -213,6 +208,48 @@ fn resolve_url(
         .join(&value)
         .map_err(|error| JsNativeError::typ().with_message(format!("invalid URL: {error}")))?;
     Ok(JsValue::from(JsString::from(resolved.to_string())))
+}
+
+/// Splits an absolute URL into its parts for source-side routing
+/// (`resolveUrl` implementations). Returns `{ scheme, host, port, path,
+/// query }` with `port` null when absent and `query` the raw string
+/// without `?` (null when absent). Ports: same shape from the platform
+/// URL parser.
+fn parse_url(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let raw = string_argument(args, 0, context)?;
+    let url = Url::parse(&raw)
+        .map_err(|error| JsNativeError::typ().with_message(format!("invalid URL: {error}")))?;
+    let mut parts = ObjectInitializer::new(context);
+    parts.property(
+        JsString::from("scheme"),
+        JsString::from(url.scheme()),
+        Attribute::all(),
+    );
+    let host = match url.host_str() {
+        Some(host) => JsValue::from(JsString::from(host)),
+        None => JsValue::null(),
+    };
+    parts.property(JsString::from("host"), host, Attribute::all());
+    let port = match url.port() {
+        Some(port) => JsValue::from(port),
+        None => JsValue::null(),
+    };
+    parts.property(JsString::from("port"), port, Attribute::all());
+    parts.property(
+        JsString::from("path"),
+        JsString::from(url.path()),
+        Attribute::all(),
+    );
+    let query = match url.query() {
+        Some(query) => JsValue::from(JsString::from(query)),
+        None => JsValue::null(),
+    };
+    parts.property(JsString::from("query"), query, Attribute::all());
+    Ok(parts.build().into())
 }
 
 fn fail(_this: &JsValue, args: &[JsValue], context: &mut Context) -> boa_engine::JsResult<JsValue> {
@@ -256,7 +293,7 @@ fn http_request(
         JsNativeError::typ().with_message(format!("invalid HTTP request: {error}"))
     })?;
 
-    let response = state.host.borrow_mut().request(request).map_err(|error| {
+    let response = state.host.request(request).map_err(|error| {
         let code = match error {
             crate::host::HostError::ChallengeRequired { .. } => "CHALLENGE_REQUIRED",
             crate::host::HostError::RateLimited => "RATE_LIMITED",
@@ -303,7 +340,6 @@ fn browser_run(
     })?;
     let result = state
         .host
-        .borrow_mut()
         .run_browser(request)
         .map_err(|error| source_host_error(error, context, "BROWSER_ERROR"))?;
     let value = serde_json::to_value(result).map_err(JsError::from_rust)?;
@@ -317,9 +353,12 @@ fn store_get(
     args: &[JsValue],
     context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    let key = store_key(args, 0, context)?;
+    let key = string_argument(args, 0, context)?;
     let state = store_state(this)?;
-    let stored = state.store.borrow().get(&key).cloned();
+    let stored = state
+        .store
+        .get(&key)
+        .map_err(|error| JsNativeError::typ().with_message(error.message()))?;
     match stored {
         Some(value) => Ok(JsValue::from_json(&value, context)?),
         None => Ok(JsValue::null()),
@@ -331,52 +370,24 @@ fn store_set(
     args: &[JsValue],
     context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    let key = store_key(args, 0, context)?;
+    let key = string_argument(args, 0, context)?;
     let state = store_state(this)?;
-    let value = args
+    let value = match args
         .get(1)
         .unwrap_or(&JsValue::undefined())
         .to_json(context)?
-        .ok_or_else(|| JsNativeError::typ().with_message("store.set requires a value"))?;
-    let mut store = state.store.borrow_mut();
-    if value.is_null() {
-        store.remove(&key);
-        return Ok(JsValue::from(true));
+    {
+        Some(value) => value,
+        None => {
+            return Err(JsNativeError::typ()
+                .with_message("store.set requires a value")
+                .into());
+        }
+    };
+    match state.store.set(&key, &value) {
+        Ok(()) => Ok(JsValue::from(true)),
+        Err(error) => Err(JsNativeError::typ().with_message(error.message()).into()),
     }
-    let size = serde_json::to_string(&value)
-        .map(|text| text.len())
-        .unwrap_or(usize::MAX);
-    if size > wef_core::store_limits::VALUE_MAX_BYTES {
-        return Err(JsNativeError::typ()
-            .with_message(format!(
-                "store value exceeds {} bytes",
-                wef_core::store_limits::VALUE_MAX_BYTES
-            ))
-            .into());
-    }
-    if !store.contains_key(&key) && store.len() >= wef_core::store_limits::MAX_KEYS {
-        return Err(JsNativeError::typ()
-            .with_message(format!(
-                "store holds at most {} keys",
-                wef_core::store_limits::MAX_KEYS
-            ))
-            .into());
-    }
-    store.insert(key, value);
-    Ok(JsValue::from(true))
-}
-
-fn store_key(args: &[JsValue], index: usize, context: &mut Context) -> Result<String, JsError> {
-    let key = string_argument(args, index, context)?;
-    if key.is_empty() || key.len() > wef_core::store_limits::KEY_MAX_LEN {
-        return Err(JsNativeError::typ()
-            .with_message(format!(
-                "store key must be 1..={} chars",
-                wef_core::store_limits::KEY_MAX_LEN
-            ))
-            .into());
-    }
-    Ok(key)
 }
 
 fn store_state(this: &JsValue) -> boa_engine::JsResult<StoreState> {
@@ -618,9 +629,8 @@ fn element_attr(
 ) -> boa_engine::JsResult<JsValue> {
     let name = string_argument(args, 0, context)?;
     let state = element_state(this)?;
-    Ok(element_from_state(&state)?
-        .attr(&name)
-        .map(JsString::from)
-        .map(JsValue::from)
-        .unwrap_or_else(JsValue::undefined))
+    match element_from_state(&state)?.attr(&name) {
+        Some(text) => Ok(JsValue::from(JsString::from(text))),
+        None => Ok(JsValue::undefined()),
+    }
 }

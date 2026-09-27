@@ -1,5 +1,6 @@
 //! Command-line runner for WEF source packages.
 
+mod demo;
 mod repl;
 
 use std::{
@@ -29,7 +30,9 @@ Usage:
   wef run [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> search <query> [--page <number>] [--filters <json|@file>]
   wef run [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> update <manga-json|@file> [--existing-chapters <json|@file>] [--details-only|--chapters-only]
   wef run [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> pages <manga-json|@file> <chapter-json|@file>
+  wef info [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] <path> <manga-key> [chapter-key]
   wef test <path> [--json]
+  wef demo [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>] [--port N] [--dir <extensions-dir>] <path>...
   wef repl [--session <cookie-jar.json>] [--settings <json|@file>] [--cdp <local-url>] [--store <store.json>]
 
 `run` performs real HTTP requests. `--cdp` attaches to an already-running local Chromium
@@ -60,6 +63,8 @@ where
         "lint" => lint(&args[1..]),
         "lint-repo" => lint_repo(&args[1..]),
         "run" => run(&args[1..]),
+        "info" => info(&args[1..]),
+        "demo" => demo::demo(&args[1..]),
         "test" => test(&args[1..]),
         "repl" | "interactive" | "shell" => repl::repl(&args[1..]),
         _ => Err(format!("unknown command {command:?}\n\n{USAGE}")),
@@ -355,6 +360,246 @@ fn extract_option<T>(
         }
     }
     Ok((option, remaining))
+}
+
+/// Shows one manga (and optionally one chapter's pages) in human-readable
+/// form: the inspector for the page-level fields (`thumbnailUrl`,
+/// `description`, per-image headers) that raw `run` JSON buries. Same
+/// host lifecycle as `run` (CDP branch or cookie-jar branch).
+fn info(args: &[String]) -> Result<String, String> {
+    let (session_path, args) = extract_session_option(args)?;
+    let (settings, args) = extract_settings_option(&args)?;
+    let (cdp_url, args) = extract_cdp_option(&args)?;
+    let (store_path, args) = extract_store_option(&args)?;
+    if args.len() < 2 {
+        return Err(format!(
+            "expected wef info <path> <manga-key> [chapter-key]\n\n{USAGE}"
+        ));
+    }
+    if args.len() > 3 {
+        return Err("info accepts only a path, a manga key, and an optional chapter key".into());
+    }
+    if cdp_url.is_some() && session_path.is_some() {
+        return Err(
+            "--cdp uses the browser profile for cookies; do not combine it with --session".into(),
+        );
+    }
+    let package = load_package(&args[0])?;
+    let manga_key = args[1].clone();
+    let chapter_key = args.get(2).cloned();
+
+    if let Some(cdp_url) = cdp_url {
+        let mut policy = BrowserPolicy::for_origins(package.manifest().base_urls.clone());
+        policy.consent_granted = true;
+        let engine = Engine::with_host(
+            CdpBrowserHost::new(&cdp_url, policy).map_err(|error| error.to_string())?,
+        )
+        .with_settings(settings);
+        restore_store(&engine, &store_path)?;
+        let output = fetch_info(&engine, &package, &manga_key, chapter_key.as_deref());
+        save_store(&engine, &store_path)?;
+        return output;
+    }
+
+    let host = UreqHost::default();
+    if let Some(session_path) = &session_path
+        && session_path.exists()
+    {
+        let file = fs::File::open(session_path).map_err(|error| {
+            format!(
+                "could not open cookie session {}: {error}",
+                session_path.display()
+            )
+        })?;
+        host.load_cookie_jar_json(BufReader::new(file))
+            .map_err(|error| error.to_string())?;
+    }
+
+    let engine = Engine::with_host(host.clone()).with_settings(settings);
+    restore_store(&engine, &store_path)?;
+    let output = fetch_info(&engine, &package, &manga_key, chapter_key.as_deref());
+    if let Some(session_path) = &session_path {
+        let file = fs::File::create(session_path).map_err(|error| {
+            format!(
+                "could not save cookie session {}: {error}",
+                session_path.display()
+            )
+        })?;
+        host.save_cookie_jar_json(&mut BufWriter::new(file))
+            .map_err(|error| error.to_string())?;
+    }
+    save_store(&engine, &store_path)?;
+    output
+}
+
+fn fetch_info(
+    engine: &Engine,
+    package: &Package,
+    manga_key: &str,
+    chapter_key: Option<&str>,
+) -> Result<String, String> {
+    let update_value = engine
+        .run(
+            package,
+            Operation::GetMangaUpdate,
+            json!({
+                "manga": {"key": manga_key, "title": manga_key},
+                "chapters": [],
+                "fetchDetails": true,
+                "fetchChapters": true,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+    let update: wef_core::MangaUpdate =
+        serde_json::from_value(update_value).map_err(|error| format!("invalid update: {error}"))?;
+    let chapters = update.chapters.clone().unwrap_or_default();
+    let pages = match chapter_key {
+        None => None,
+        Some(key) => {
+            let chapter = chapters
+                .iter()
+                .find(|chapter| chapter.key == key)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("chapter {key:?} not found in {} chapters", chapters.len())
+                })?;
+            let manga_value = match &update.manga {
+                Some(manga) => serde_json::to_value(manga).map_err(|error| error.to_string())?,
+                None => json!({"key": manga_key, "title": manga_key}),
+            };
+            let pages_value = engine
+                .run(
+                    package,
+                    Operation::GetPages,
+                    json!({
+                        "manga": manga_value,
+                        "chapter": serde_json::to_value(&chapter).map_err(|error| error.to_string())?,
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            let pages: Vec<wef_core::Page> = serde_json::from_value(pages_value)
+                .map_err(|error| format!("invalid pages: {error}"))?;
+            Some((chapter, pages))
+        }
+    };
+    Ok(render_info(
+        manga_key,
+        &update,
+        pages
+            .as_ref()
+            .map(|(chapter, pages)| (chapter, pages.as_slice())),
+    ))
+}
+
+fn render_info(
+    manga_key: &str,
+    update: &wef_core::MangaUpdate,
+    pages: Option<(&wef_core::Chapter, &[wef_core::Page])>,
+) -> String {
+    let mut out = String::new();
+    match &update.manga {
+        Some(manga) => {
+            out.push_str(&format!("{} ({})\n", manga.title, manga.key));
+            if let Some(url) = &manga.url {
+                out.push_str(&format!("  url: {url}\n"));
+            }
+            if let Some(status) = &manga.status {
+                out.push_str(&format!("  status: {status:?}\n"));
+            }
+            if let Some(rating) = &manga.content_rating {
+                out.push_str(&format!("  rating: {rating:?}\n"));
+            }
+            if let Some(viewer) = &manga.viewer {
+                out.push_str(&format!("  viewer: {viewer:?}\n"));
+            }
+            if let Some(authors) = &manga.authors {
+                out.push_str(&format!("  authors: {}\n", authors.join(", ")));
+            }
+            if let Some(artists) = &manga.artists {
+                out.push_str(&format!("  artists: {}\n", artists.join(", ")));
+            }
+            if let Some(tags) = &manga.tags {
+                out.push_str(&format!("  tags: {}\n", tags.join(", ")));
+            }
+            if let Some(cover) = &manga.cover_url {
+                out.push_str(&format!("  cover: {cover}\n"));
+            }
+            if let Some(description) = &manga.description {
+                out.push_str(&format!("  description: {}\n", truncate(description, 800)));
+            }
+            if let Some(extra) = &manga.extra {
+                out.push_str(&format!(
+                    "  extra: {}\n",
+                    serde_json::to_string(extra).unwrap_or_default()
+                ));
+            }
+        }
+        None => out.push_str(&format!("{manga_key} (no details returned)\n")),
+    }
+    let chapters = update.chapters.as_deref().unwrap_or_default();
+    out.push_str(&format!("  chapters ({}):\n", chapters.len()));
+    for chapter in chapters {
+        let mut markers = Vec::new();
+        if let Some(number) = &chapter.number {
+            markers.push(format!("no. {number}"));
+        }
+        if let Some(language) = &chapter.language {
+            markers.push(language.clone());
+        }
+        if chapter.locked == Some(true) {
+            markers.push("locked".into());
+        }
+        let suffix = if markers.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", markers.join(", "))
+        };
+        out.push_str(&format!(
+            "    [{}] {}{}\n",
+            chapter.key, chapter.name, suffix
+        ));
+        if let Some(thumbnail) = &chapter.thumbnail_url {
+            out.push_str(&format!("      thumbnail: {thumbnail}\n"));
+        }
+    }
+    if let Some((chapter, pages)) = pages {
+        out.push_str(&format!(
+            "  pages of [{}] {} ({}):\n",
+            chapter.key,
+            chapter.name,
+            pages.len()
+        ));
+        for (index, page) in pages.iter().enumerate() {
+            let target = page
+                .image_url
+                .as_deref()
+                .or(page.url.as_deref())
+                .unwrap_or("(no url)");
+            out.push_str(&format!("    {}. {target}\n", index + 1));
+            if let Some(thumbnail) = &page.thumbnail_url {
+                out.push_str(&format!("      thumbnail: {thumbnail}\n"));
+            }
+            if let Some(description) = &page.description {
+                out.push_str(&format!(
+                    "      description: {}\n",
+                    truncate(description, 300)
+                ));
+            }
+            if let Some(headers) = &page.headers {
+                let names: Vec<&str> = headers.keys().map(String::as_str).collect();
+                out.push_str(&format!("      headers: {}\n", names.join(", ")));
+            }
+        }
+    }
+    out
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.into();
+    }
+    let head: String = value.chars().take(max_chars).collect();
+    format!("{head}… (truncated)")
 }
 
 fn test(args: &[String]) -> Result<String, String> {
@@ -708,11 +953,105 @@ mod tests {
     }
 
     #[test]
+    fn info_requires_a_path_and_manga_key() {
+        let error = info(&[]).unwrap_err();
+        assert!(error.contains("manga-key"), "{error}");
+        let error = info(&["path".into(), "m".into(), "c".into(), "extra".into()]).unwrap_err();
+        assert!(error.contains("only a path"), "{error}");
+    }
+
+    #[test]
+    fn renders_manga_chapters_and_pages() {
+        let update = wef_core::MangaUpdate {
+            manga: Some(wef_core::Manga {
+                key: "m1".into(),
+                title: "First".into(),
+                url: Some("https://example.org/manga/m1".into()),
+                cover_url: Some("https://example.org/covers/m1.jpg".into()),
+                alternative_titles: None,
+                description: Some("A tale.".into()),
+                authors: Some(vec!["Author".into()]),
+                artists: None,
+                tags: Some(vec!["action".into(), "drama".into()]),
+                status: Some(wef_core::MangaStatus::Completed),
+                content_rating: None,
+                viewer: None,
+                update_strategy: None,
+                next_update_at: None,
+                extra: None,
+            }),
+            chapters: Some(vec![wef_core::Chapter {
+                key: "c1".into(),
+                name: "Chapter 1".into(),
+                url: None,
+                title: None,
+                number: Some("1".into()),
+                number_value: Some(1.0),
+                volume: None,
+                volume_value: None,
+                language: Some("en".into()),
+                published_at: None,
+                scanlators: None,
+                thumbnail_url: None,
+                locked: None,
+                extra: None,
+            }]),
+        };
+        let pages = vec![wef_core::Page {
+            url: None,
+            image_url: Some("https://example.org/img/1.png".into()),
+            thumbnail_url: Some("https://example.org/img/1t.png".into()),
+            description: Some("Splash.".into()),
+            headers: Some(std::collections::BTreeMap::from([(
+                "Referer".to_string(),
+                "https://example.org/".to_string(),
+            )])),
+            context: None,
+        }];
+        let chapter = update.chapters.as_ref().unwrap().first().unwrap();
+        let output = render_info("m1", &update, Some((chapter, pages.as_slice())));
+        assert!(output.contains("First (m1)"), "{output}");
+        assert!(output.contains("status: Completed"), "{output}");
+        assert!(output.contains("chapters (1):"), "{output}");
+        assert!(output.contains("[c1] Chapter 1 (no. 1, en)"), "{output}");
+        assert!(output.contains("pages of [c1] Chapter 1 (1):"), "{output}");
+        assert!(
+            output.contains("1. https://example.org/img/1.png"),
+            "{output}"
+        );
+        assert!(
+            output.contains("thumbnail: https://example.org/img/1t.png"),
+            "{output}"
+        );
+        assert!(output.contains("description: Splash."), "{output}");
+        assert!(output.contains("headers: Referer"), "{output}");
+    }
+
+    #[test]
+    fn renders_missing_details_and_truncates_long_text() {
+        let update = wef_core::MangaUpdate {
+            manga: None,
+            chapters: Some(vec![]),
+        };
+        let output = render_info("m9", &update, None);
+        assert!(output.contains("m9 (no details returned)"), "{output}");
+        assert!(output.contains("chapters (0):"), "{output}");
+        assert_eq!(truncate("abc", 800), "abc");
+        let long = "x".repeat(900);
+        let shortened = truncate(&long, 800);
+        assert!(shortened.ends_with("… (truncated)"), "{shortened}");
+        assert_eq!(
+            shortened.chars().count(),
+            800 + "… (truncated)".chars().count()
+        );
+    }
+
+    #[test]
     fn extracts_an_explicit_cookie_session_path() {
         let (session, remaining) = extract_session_option(&[
             "--session".into(),
             "cookies.json".into(),
-            "examples/multi.wef.magadex".into(),
+            "examples/multi.wef.mangadex".into(),
             "listing".into(),
             "latest".into(),
         ])
@@ -720,7 +1059,7 @@ mod tests {
         assert_eq!(session, Some(PathBuf::from("cookies.json")));
         assert_eq!(
             remaining,
-            ["examples/multi.wef.magadex", "listing", "latest"]
+            ["examples/multi.wef.mangadex", "listing", "latest"]
         );
     }
 
@@ -739,7 +1078,7 @@ mod tests {
     #[test]
     fn runs_the_mangadex_fixture() {
         let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.magadex");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.mangadex");
         let output = run_with_args(["test", path.to_str().unwrap()]).unwrap();
         assert_eq!(output, "7 fixture(s) passed");
     }
@@ -747,10 +1086,10 @@ mod tests {
     #[test]
     fn validates_the_mangadex_package() {
         let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.magadex");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.mangadex");
         let output = run_with_args(["validate", path.to_str().unwrap()]).unwrap();
         assert!(output.contains("valid package:"));
-        assert!(output.contains("\"id\": \"multi.wef.magadex\""));
+        assert!(output.contains("\"id\": \"multi.wef.mangadex\""));
     }
 
     #[test]

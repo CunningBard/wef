@@ -43,10 +43,12 @@ impl CdpBrowserHost {
                 "CDP endpoint must be an explicit local HTTP(S) URL".into(),
             ));
         }
+        let mut http = UreqHost::default();
+        http.set_allowed_urls(&policy.allowed_origins.iter().cloned().collect::<Vec<_>>());
         Ok(Self {
             debug_url,
             policy,
-            http: UreqHost::default(),
+            http,
             sessions: BTreeMap::new(),
             next_session: 0,
         })
@@ -63,7 +65,16 @@ impl CdpBrowserHost {
     /// of every loaded package's base URLs, so it only ever grows. Ports:
     /// a set insertion guarded by the same lock as the host itself.
     pub fn add_allowed_origin(&mut self, origin: impl Into<String>) {
-        self.policy.allowed_origins.insert(origin.into());
+        let origin = origin.into();
+        self.policy.allowed_origins.insert(origin.clone());
+        self.http.set_allowed_urls(
+            &self
+                .policy
+                .allowed_origins
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
     }
 
     /// Test-only session injector: the real flow mints sessions inside
@@ -249,10 +260,13 @@ fn read_one(socket: &mut Socket) -> Result<Option<Value>, HostError> {
 
 impl WefHost for CdpBrowserHost {
     fn request(&mut self, mut request: HttpRequest) -> Result<HttpResponse, HostError> {
-        let session = request
-            .browser_session
-            .take()
-            .ok_or(HostError::Unsupported)?;
+        let Some(session) = request.browser_session.take() else {
+            // Plain HTTP needs no browser: serve it from the inner host
+            // (allowlisted and rate-limited like any backend). Only
+            // session-authenticated requests touch the browser profile.
+            // Ports: same split — plain requests must never require a tab.
+            return self.http.request(request);
+        };
         let cookie = self
             .sessions
             .get(&session)
@@ -266,6 +280,18 @@ impl WefHost for CdpBrowserHost {
         let headers = request.headers.get_or_insert_with(BTreeMap::new);
         headers.insert("Cookie".into(), cookie);
         self.http.request(request)
+    }
+
+    /// Replaces the allowlist with the current manifest's entries: the
+    /// engine is authoritative per run, so a previously loaded package's
+    /// origins never ride along. Ports: replace, don't union.
+    fn set_allowed_urls(&mut self, urls: &[String]) {
+        self.policy.allowed_origins = urls.iter().cloned().collect();
+        self.http.set_allowed_urls(urls);
+    }
+
+    fn set_rate_limit(&mut self, limit: Option<wef_core::RateLimit>) {
+        self.http.set_rate_limit(limit);
     }
 
     fn run_browser(&mut self, request: BrowserRunRequest) -> Result<BrowserRunResult, HostError> {
@@ -335,6 +361,14 @@ impl CdpBrowserHost {
                 snapshot_payload(session, &task.selector)
             }
             wef_core::BrowserTask::Capture(task) => {
+                // Install the tap before navigation too: page bundles run
+                // atob (cipher material) during initial evaluation, before
+                // the post-load tap below would see them. Fixed bytes, same
+                // safety argument as the existing tap.
+                let _ = session.call(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({"source": TAP_INSTALL}),
+                );
                 self.load(session, request)?;
                 // Best effort: enables observation of client-decrypted values
                 // (e.g. envelopes the Network domain only sees ciphertext

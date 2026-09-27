@@ -7,7 +7,7 @@ const MANGA_ID: &str = "11111111-1111-4111-8111-111111111111";
 const CHAPTER_ID: &str = "22222222-2222-4222-8222-222222222222";
 
 fn package() -> Package {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.magadex");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi.wef.mangadex");
     Package::load(root).unwrap()
 }
 
@@ -173,7 +173,7 @@ fn minimal_manga() -> Value {
 #[test]
 fn loads_the_mangadex_package() {
     let package = package();
-    assert_eq!(package.manifest().id, "multi.wef.magadex");
+    assert_eq!(package.manifest().id, "multi.wef.mangadex");
     assert_eq!(package.manifest().listings.len(), 2);
 }
 

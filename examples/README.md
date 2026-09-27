@@ -16,7 +16,7 @@ The directory name MUST equal the manifest `id`, using the repository
 identity scheme `<language|multi>.wef.<site>`:
 
 ```text
-examples/multi.wef.magadex/   # multi-language public API source
+examples/multi.wef.mangadex/   # multi-language public API source
 examples/en.wef.html-example/ # English fictional HTML source
 ```
 

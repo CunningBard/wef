@@ -1,13 +1,20 @@
 # WEF conformance fixtures
 
 `core-source` exercises every required 0.0.1 operation. `0.0.2-source`
-covers settings, rich filters, and image candidates. `binary` covers
+covers settings, rich filters, and image candidates. `0.1.0-source`
+exercises the full 0.1.0 wire: listings with filters, search with the
+specified `UNSUPPORTED` browser-to-HTTP fallback, selective updates with
+HTML parsing, pages with a `ctx.store` round-trip, every filter and
+setting kind, URL resolution (including `null`), image
+requests/candidates, both transform styles (byte-wise and
+decode/blit/encode), and key migration. `binary` covers
 byte/XOR and grid-descramble image transforms with strict limits. All
 use the deterministic `wef test` fixture format used by real sources.
 
 ```sh
 cargo run -p wef-cli -- test fixtures/conformance/core-source
 cargo run -p wef-cli -- test fixtures/conformance/0.0.2-source
+cargo run -p wef-cli -- test fixtures/conformance/0.1.0-source
 ```
 
 `binary/` holds shared image blobs (referenced by engine unit tests),
@@ -17,11 +24,12 @@ not a runnable package.
 
 | Spec surface | Fixtures | Engine unit tests |
 |---|---|---|
-| core operations (listing/search/update/pages) | `core-source`, real sources | `engine` op tests |
-| settings, rich filters | `0.0.2-source` | `validate_filters` tests |
-| image candidates + transforms | `0.0.2-source`, `binary` | transform limit tests |
-| rate limits | — | `UreqHost` rate-window tests |
-| source storage (`ctx.store`) | n/a (fresh engine per fixture) | store persistence/isolation/limit tests |
+| core operations (listing/search/update/pages) | `core-source`, `0.1.0-source`, real sources | `engine` op tests |
+| settings, rich filters | `0.0.2-source`, `0.1.0-source` | `validate_filters` tests |
+| image candidates + transforms | `0.0.2-source`, `0.1.0-source`, `binary` | transform limit tests |
+| browser `UNSUPPORTED` fallback | `0.1.0-source` search fixture | capture matching + tap invariant tests |
+| source storage (`ctx.store`) | `0.1.0-source` pages fixture (within one op; fresh engine per fixture) | store persistence/isolation/limit tests |
+| URL resolution, key migration | `0.1.0-source` | extension validation tests |
 | browser capture predicate | n/a (mock hosts return payloads literally) | capture matching + tap invariant tests |
 | import jail | n/a | traversal + symlink escape tests |
 | error codes | n/a | `code()` contract tests |
